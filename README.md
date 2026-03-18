@@ -1,0 +1,67 @@
+# SimLocation
+
+`SimLocation` 是一个本地命令行工具，用来在 macOS 上通过 `pymobiledevice3` 给已连接的 iPhone 或 iPad 设置模拟定位。
+
+它更适合已经在用 `pymobiledevice3` 和 `tunneld` 的人：想快速切换到一组坐标，保持定位一段时间，或者在测试完之后手动清掉。
+
+## 适合做什么
+
+- 调试依赖定位的 App
+- 复现和排查基于经纬度触发的功能
+- 演示特定地点的界面或流程
+- 做一些需要反复切换坐标的本地测试
+
+## 应用场景
+
+常见用法很直接：把设备连到 Mac，确认 `tunneld` 可用，然后用命令传入一组经纬度开始模拟定位。工具会保持会话，直到你执行清除。
+
+如果你平时总是用同一组私人测试坐标，也可以只在本机环境里设置：`SIMLOCATION_DEFAULT_LAT` 和 `SIMLOCATION_DEFAULT_LON`。这是可选的本地默认值，不建议写进仓库。
+
+## 基本准备
+
+使用前默认你已经具备这些条件：
+
+- 运行环境是 `macOS`
+- 有一台可连接的 `iPhone` 或 `iPad`
+- 已安装 `pymobiledevice3`
+- `tunneld` 正常运行，设备能建立可用连接
+- `python3` 已安装 `requests` 和 `pymobiledevice3`，或者你通过 `SIMLOCATION_PYTHON` 指定了对应解释器
+
+入口脚本是 `bin/simlocation`。如果设置了 `SIMLOCATION_PYTHON`，它会优先使用这个 Python；否则会尝试直接使用当前的 `python3`。
+
+## 坐标用法
+
+最直接的方式是每次显式传入坐标：
+
+```bash
+bin/simlocation <纬度> <经度>
+```
+
+清除模拟定位：
+
+```bash
+bin/simlocation --clear
+```
+
+如果你只想在自己电脑上保留一组常用默认值，可以设置：
+
+```bash
+export SIMLOCATION_DEFAULT_LAT=<你的纬度>
+export SIMLOCATION_DEFAULT_LON=<你的经度>
+```
+
+设置后，执行 `bin/simlocation` 时可以不再重复输入经纬度；如果没有提供命令行坐标，程序会读取这两个环境变量。
+
+运行时文件默认放在 `var/` 下，包括：
+
+- `var/simlocation.log`
+- `var/simlocation.pid`
+- `var/simlocation.state.json`
+
+如果你想改位置，可以设置 `SIMLOCATION_VAR_DIR`。
+
+## 局限性
+
+这个项目面向 `macOS` 上配合 `iPhone` 或 `iPad` 的本地定位测试。
+
+它不是多平台方案，也不打算覆盖 Windows、Linux、Android，或者更通用的设备管理流程。如果你的需求超出这类本地测试场景，可能需要自己扩展，或者换别的工具。

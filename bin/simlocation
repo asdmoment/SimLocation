@@ -1,0 +1,37 @@
+#!/bin/sh
+
+set -eu
+
+SCRIPT_PATH=$0
+case "$SCRIPT_PATH" in
+  /*) ;;
+  *) SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;;
+esac
+
+while [ -L "$SCRIPT_PATH" ]; do
+  LINK_TARGET=$(readlink "$SCRIPT_PATH")
+  case "$LINK_TARGET" in
+    /*) SCRIPT_PATH="$LINK_TARGET" ;;
+    *) SCRIPT_PATH=$(dirname -- "$SCRIPT_PATH")/"$LINK_TARGET" ;;
+  esac
+done
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+PYTHON_IMPL="$SCRIPT_DIR/simlocation.py"
+
+if [ "${SIMLOCATION_PYTHON:-}" ]; then
+  if [ -x "$SIMLOCATION_PYTHON" ]; then
+    PYTHON_BIN="$SIMLOCATION_PYTHON"
+  else
+    printf '%s\n' "SIMLOCATION_PYTHON is set but not executable: $SIMLOCATION_PYTHON" >&2
+    exit 1
+  fi
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import requests, pymobiledevice3' >/dev/null 2>&1; then
+  PYTHON_BIN=$(command -v python3)
+else
+  printf '%s\n' "Unable to find a Python runtime for simlocation." >&2
+  printf '%s\n' "Set SIMLOCATION_PYTHON to an executable Python with requests and pymobiledevice3, or install those packages for python3." >&2
+  exit 1
+fi
+
+exec "$PYTHON_BIN" "$PYTHON_IMPL" "$@"
