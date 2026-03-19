@@ -215,9 +215,18 @@ confirmBtn.addEventListener("click", function () {
   xhr.setRequestHeader("Content-Type", "application/json");
   xhr.onreadystatechange = function () {
     if (xhr.readyState === 4) {
-      confirmBtn.style.display = "none";
-      doneMsgEl.style.display = "block";
+      if (xhr.status >= 200 && xhr.status < 300) {
+        confirmBtn.style.display = "none";
+        doneMsgEl.style.display = "block";
+      } else {
+        confirmBtn.disabled = false;
+        alert("提交失败，请重试。");
+      }
     }
+  };
+  xhr.onerror = function () {
+    confirmBtn.disabled = false;
+    alert("无法连接到本地服务，请检查终端。");
   };
   xhr.send(JSON.stringify({ lat: currentWgs.lat, lon: currentWgs.lng }));
 });
