@@ -39,6 +39,38 @@ pip install pymobiledevice3 requests
 
 > iOS 16 及以上版本需要手动开启开发者模式，否则无法建立开发者服务连接。
 
+## 连接设备
+
+设备开启开发者模式后，需要通过 `tunneld` 建立通信隧道。
+
+**1. 启动 tunneld**
+
+```bash
+$ sudo pymobiledevice3 remote tunneld
+```
+
+`tunneld` 需要 `sudo` 权限，启动后会在前台运行，保持终端窗口不要关闭。
+
+**2. 用 USB 连接设备**
+
+第一次连接时，设备会弹出「信任此电脑？」的对话框，点击「信任」并输入锁屏密码。
+
+**3. 验证连接**
+
+```bash
+$ pymobiledevice3 usbmux list
+```
+
+如果能看到你的设备信息（UDID、设备名等），说明连接正常。
+
+**排查连接问题**
+
+如果没有设备显示：
+
+- 拔掉 USB 线重新插入
+- 在终端中重启 `tunneld`（Ctrl+C 停止后重新运行）
+- 检查设备是否已解锁并信任了当前 Mac
+
 ## 基本准备
 
 使用前默认你已经具备这些条件：
@@ -46,7 +78,7 @@ pip install pymobiledevice3 requests
 - 运行环境是 `macOS`
 - 有一台已开启开发者模式的 `iPhone` 或 `iPad`
 - 已安装 `pymobiledevice3`（`pip install pymobiledevice3`）
-- `tunneld` 正常运行，设备能建立可用连接
+- `tunneld` 正常运行，设备已完成配对（详见上方「连接设备」）
 - `python3` 已安装 `requests` 和 `pymobiledevice3`，或者你通过 `SIMLOCATION_PYTHON` 指定了对应解释器
 
 入口脚本是 `bin/simlocation`。如果设置了 `SIMLOCATION_PYTHON`，它会优先使用这个 Python；否则会尝试直接使用当前的 `python3`。
@@ -80,11 +112,99 @@ $ export SIMLOCATION_DEFAULT_LON=<你的经度>
 
 运行时文件默认放在 `var/` 下，包括：
 
-- `var/simlocation.log`
-- `var/simlocation.pid`
-- `var/simlocation.state.json`
+- `var/devices.json` — 设备别名和默认设备配置
+- `var/<UDID>.log` — 每台设备的会话日志
+- `var/<UDID>.pid` — 每台设备的后台进程 PID
+- `var/<UDID>.state.json` — 每台设备的会话状态
 
 如果你想改位置，可以设置 `SIMLOCATION_VAR_DIR`。
+
+## 多设备管理
+
+连接多台设备时，可以用别名来管理和指定目标设备。
+
+**发现设备**
+
+```bash
+$ simlocation device list
+```
+
+列出当前 `tunneld` 能看到的所有已连接设备。
+
+**注册别名**
+
+```bash
+$ simlocation device add <别名> [UDID]
+```
+
+给设备取一个好记的名字。省略 UDID 时会交互式选择。
+
+**设置默认设备**
+
+```bash
+$ simlocation device default <别名或UDID>
+```
+
+设置后，`set`、`clear`、`map` 等命令不指定 `--device` 时会自动使用这台设备。
+
+查看当前默认设备：
+
+```bash
+$ simlocation device default
+```
+
+**指定设备操作**
+
+在 `set`、`clear`、`map` 等命令上通过 `--device`（`-d`）指定目标设备：
+
+```bash
+$ simlocation set --device <别名> <纬度> <经度>
+$ simlocation clear --device <别名>
+```
+
+**查看所有会话状态**
+
+```bash
+$ simlocation status
+```
+
+显示所有设备的定位模拟状态。
+
+**批量清除**
+
+```bash
+$ simlocation clear --all
+```
+
+一次性清除所有设备的模拟定位。
+
+**删除别名**
+
+```bash
+$ simlocation device remove <别名>
+```
+
+**典型工作流**
+
+```bash
+# 1. 启动 tunneld（另一个终端）
+sudo pymobiledevice3 remote tunneld
+
+# 2. 查看已连接设备
+simlocation device list
+
+# 3. 给设备注册别名
+simlocation device add myphone
+
+# 4. 设为默认设备
+simlocation device default myphone
+
+# 5. 设置模拟定位（自动使用默认设备）
+simlocation set 39.9042 116.4074
+
+# 6. 用完清除
+simlocation clear
+```
 
 ## 地图选点
 
