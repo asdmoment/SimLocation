@@ -10,13 +10,15 @@ SimLocation is a macOS CLI tool that sets simulated GPS locations on connected i
 
 Two-layer entry point:
 - **`bin/simlocation`** — POSIX shell wrapper that resolves symlinks, discovers a suitable Python interpreter (checking `SIMLOCATION_PYTHON`, then `python3` with required deps), and `exec`s into the Python CLI.
-- **`bin/simlocation.py`** — Async Python CLI. On `set`, it spawns a detached background process (`--_hold-session`) that opens a DVT connection via `RemoteServiceDiscoveryService` → `DvtSecureSocketProxyService`/`DvtProvider` → `LocationSimulation`, then holds the session until SIGTERM. The foreground process polls `var/simlocation.state.json` for "ready" status and exits.
+- **`bin/simlocation.py`** — Async Python CLI with subcommands: `set`, `clear`, `map`, `status`, and `device` (`list`/`add`/`remove`/`default`). Supports a global `--device` (`-d`) flag to target a specific device by alias or UDID. On `set`, it spawns a detached background process (`--_hold-session`) that opens a DVT connection via `RemoteServiceDiscoveryService` → `DvtSecureSocketProxyService`/`DvtProvider` → `LocationSimulation`, then holds the session until SIGTERM. The foreground process polls per-device state files for "ready" status and exits.
 
 pymobiledevice3 compatibility: imports are wrapped in `try/except` to support both v8.x (`DvtSecureSocketProxyService`) and v9.x (`DvtProvider`).
 
 Map picker: `simlocation map` starts a temporary HTTP server and opens a browser-based map. Two map providers are supported via separate HTML files:
 - **`web/map-osm.html`** — Leaflet + OpenStreetMap (default, no key needed, WGS-84 native)
 - **`web/map-amap.html`** — Amap JS API (used when `SIMLOCATION_AMAP_KEY` is set, GCJ-02 → WGS-84 conversion in JS)
+
+Multi-device state: device aliases and the default device are stored in `var/devices.json`. Per-device runtime files use the device UDID as prefix: `var/<UDID>.state.json`, `var/<UDID>.pid`, `var/<UDID>.log`.
 
 Helper script: `tools/pm3-afc-sync.sh` handles AFC file sync (photo export, file push) and is independent of the location CLI.
 
