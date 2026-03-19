@@ -319,27 +319,94 @@ def run_json_command(cmd, log_path=None, timeout=CMD_TIMEOUT_SECONDS):
         return None
 
 
-def resolve_device_udid(pmd3_bin, log_path=None):
+def discover_devices(pmd3_bin, log_path=None):
+    """Return a list of UDIDs from tunneld and/or lockdown."""
+    udids = set()
+    try:
+        data = get_tunneld_snapshot(log_path)
+        if isinstance(data, dict):
+            udids.update(data.keys())
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            [pmd3_bin, "usbmux", "list", "--no-color"],
+            capture_output=True, text=True, timeout=CMD_TIMEOUT_SECONDS,
+        )
+        if result.returncode == 0:
+            devices = json.loads(result.stdout)
+            if isinstance(devices, list):
+                for dev in devices:
+                    if isinstance(dev, dict) and dev.get("UniqueDeviceID"):
+                        udids.add(dev["UniqueDeviceID"])
+    except Exception:
+        pass
+    return sorted(udids)
+
+
+def interactive_device_select(udids, devices_data, log_path=None):
+    """Prompt user to select a device from a list. Returns UDID."""
+    print("[?] 检测到多台设备，请选择：")
+    for i, udid in enumerate(udids, 1):
+        alias = reverse_alias(udid, devices_data)
+        label = f"{alias} ({udid})" if alias else udid
+        print(f"  {i}. {label}")
+    while True:
+        try:
+            choice = input("请输入序号: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(udids):
+                return udids[idx]
+        except (ValueError, EOFError, KeyboardInterrupt):
+            pass
+        print(f"[!] 请输入 1-{len(udids)} 之间的数字。")
+
+
+def resolve_device_udid(pmd3_bin, log_path=None, device_flag=None):
+    """Resolve target device UDID with priority chain:
+    1. --device flag (alias or UDID)
+    2. SIMLOCATION_UDID env var
+    3. devices.json default
+    4. Auto-discover (single -> auto, multiple -> interactive)
+    """
+    devices_data = read_devices()
+
+    # 1. Explicit --device flag
+    if device_flag:
+        udid = resolve_alias(device_flag, devices_data)
+        log_message(f"[*] 使用指定设备: {udid}", log_path)
+        return udid
+
+    # 2. Environment variable
     override = os.environ.get("SIMLOCATION_UDID")
     if override:
         log_message(f"[*] 使用环境变量指定 UDID: {override}", log_path)
         return override
 
+    # 3. Default device from config
+    default = devices_data.get("default")
+    if default:
+        udid = resolve_alias(default, devices_data)
+        alias = reverse_alias(udid, devices_data)
+        label = f"{alias} ({udid})" if alias else udid
+        log_message(f"[*] 使用默认设备: {label}", log_path)
+        return udid
+
+    # 4. Auto-discover
+    udids = discover_devices(pmd3_bin, log_path)
+    if len(udids) == 1:
+        log_message(f"[*] 自动发现唯一设备: {udids[0]}", log_path)
+        return udids[0]
+    if len(udids) > 1:
+        return interactive_device_select(udids, devices_data, log_path)
+
+    # Fallback: try lockdown info
     info = run_json_command([pmd3_bin, "lockdown", "info"], log_path)
     if isinstance(info, dict):
         udid = info.get("UniqueDeviceID")
         if udid:
             log_message(f"[*] 通过 lockdown info 获取 UDID: {udid}", log_path)
             return str(udid)
-
-    try:
-        data = get_tunneld_snapshot(log_path)
-        if isinstance(data, dict) and len(data) == 1:
-            udid = next(iter(data))
-            log_message(f"[*] 通过 tunneld 获取唯一设备 UDID: {udid}", log_path)
-            return str(udid)
-    except Exception:
-        pass
 
     log_message(
         "[!] 无法自动确定设备 UDID。请连接设备后重试，或设置环境变量 SIMLOCATION_UDID。",
