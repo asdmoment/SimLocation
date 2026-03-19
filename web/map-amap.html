@@ -107,7 +107,7 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
 <div id="map"></div>
 
 <div id="search-box">
-  <input id="search-input" type="text" placeholder="搜索地点，回车查询..." />
+  <input id="search-input" type="text" placeholder="搜索地点..." />
   <div id="search-results"></div>
 </div>
 
@@ -163,8 +163,9 @@ var GCJ = (function () {
 })();
 
 /* ---- App state ---- */
-var map, marker, placeSearch;
+var map, marker, autoComplete, placeSearch;
 var currentWgs = null;
+var searchTimer = null;
 
 var panelEl      = document.getElementById("panel");
 var coordsEl     = document.getElementById("coords");
@@ -210,43 +211,78 @@ function _onAMapLoaded() {
     updateCoords(pos.getLng(), pos.getLat());
   });
 
-  /* POI search with candidates */
-  AMap.plugin("AMap.PlaceSearch", function () {
-    placeSearch = new AMap.PlaceSearch({ pageSize: 8, pageIndex: 1 });
+  /* Autocomplete + PlaceSearch for real-time suggestions */
+  AMap.plugin(["AMap.AutoComplete", "AMap.PlaceSearch"], function () {
+    autoComplete = new AMap.AutoComplete({ pageSize: 8 });
+    placeSearch = new AMap.PlaceSearch({ pageSize: 1, pageIndex: 1 });
   });
 
-  searchInput.addEventListener("keydown", function (e) {
-    if (e.key !== "Enter" || !placeSearch) return;
-    var keyword = searchInput.value.trim();
-    if (!keyword) return;
-
+  function doAmapSearch(keyword) {
+    if (!autoComplete) return;
     searchResults.innerHTML = '<div class="search-loading">搜索中...</div>';
     searchResults.style.display = "block";
 
-    placeSearch.search(keyword, function (status, result) {
-      if (status !== "complete" || !result.poiList || !result.poiList.pois.length) {
+    autoComplete.search(keyword, function (status, result) {
+      if (status !== "complete" || !result.tips || !result.tips.length) {
         searchResults.innerHTML = '<div class="search-empty">未找到匹配的地点</div>';
         return;
       }
       searchResults.innerHTML = "";
-      result.poiList.pois.forEach(function (poi) {
+      result.tips.forEach(function (tip) {
+        if (!tip.name) return;
         var div = document.createElement("div");
         div.className = "search-item";
-        var name = poi.name || "";
-        var addr = poi.address || "";
-        div.innerHTML = '<div class="name">' + escapeHtml(name) + '</div>' +
-                        (addr ? '<div class="addr">' + escapeHtml(addr) + '</div>' : '');
+        var district = tip.district || "";
+        var addr = tip.address || "";
+        var detail = [district, addr].filter(Boolean).join(" ");
+        div.innerHTML = '<div class="name">' + escapeHtml(tip.name) + '</div>' +
+                        (detail ? '<div class="addr">' + escapeHtml(detail) + '</div>' : '');
         div.addEventListener("click", function () {
-          var lng = poi.location.getLng();
-          var lat = poi.location.getLat();
-          map.setZoomAndCenter(15, [lng, lat]);
-          placeMarker(lng, lat);
-          searchInput.value = name;
-          hideResults();
+          if (tip.location && tip.location.getLng) {
+            var lng = tip.location.getLng();
+            var lat = tip.location.getLat();
+            map.setZoomAndCenter(16, [lng, lat]);
+            placeMarker(lng, lat);
+            searchInput.value = tip.name;
+            hideResults();
+          } else {
+            /* Some tips have no location — use PlaceSearch to resolve */
+            placeSearch.search(tip.name, function (s, r) {
+              if (s === "complete" && r.poiList && r.poiList.pois.length) {
+                var poi = r.poiList.pois[0];
+                var lng2 = poi.location.getLng();
+                var lat2 = poi.location.getLat();
+                map.setZoomAndCenter(16, [lng2, lat2]);
+                placeMarker(lng2, lat2);
+              }
+              searchInput.value = tip.name;
+              hideResults();
+            });
+          }
         });
         searchResults.appendChild(div);
       });
     });
+  }
+
+  /* Debounced input for real-time autocomplete */
+  searchInput.addEventListener("input", function () {
+    clearTimeout(searchTimer);
+    var keyword = searchInput.value.trim();
+    if (keyword.length < 2) {
+      hideResults();
+      return;
+    }
+    searchTimer = setTimeout(function () { doAmapSearch(keyword); }, 300);
+  });
+
+  /* Enter triggers immediate search */
+  searchInput.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter") return;
+    clearTimeout(searchTimer);
+    var keyword = searchInput.value.trim();
+    if (!keyword) return;
+    doAmapSearch(keyword);
   });
 }
 
