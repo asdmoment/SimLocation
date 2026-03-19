@@ -119,7 +119,7 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
 <div id="map"></div>
 
 <div id="search-box">
-  <input id="search-input" type="text" placeholder="搜索地点，回车查询..." />
+  <input id="search-input" type="text" placeholder="搜索地点..." />
   <div id="search-results"></div>
 </div>
 
@@ -183,21 +183,19 @@ function updateCoords(lat, lng) {
   doneMsgEl.style.display = "none";
 }
 
-/* ---- Search with candidates ---- */
+/* ---- Search with debounced autocomplete ---- */
+var searchTimer = null;
+
 function hideResults() {
   searchResults.style.display = "none";
   searchResults.innerHTML = "";
 }
 
-searchInput.addEventListener("keydown", function (e) {
-  if (e.key !== "Enter") return;
-  var keyword = searchInput.value.trim();
-  if (!keyword) return;
-
+function doSearch(keyword) {
   searchResults.innerHTML = '<div class="search-loading">搜索中...</div>';
   searchResults.style.display = "block";
 
-  fetch("https://nominatim.openstreetmap.org/search?format=json&limit=8&q=" +
+  fetch("https://nominatim.openstreetmap.org/search?format=json&limit=8&addressdetails=1&q=" +
         encodeURIComponent(keyword), {
     headers: { "Accept-Language": "zh-CN,zh,en" }
   })
@@ -207,28 +205,52 @@ searchInput.addEventListener("keydown", function (e) {
       searchResults.innerHTML = '<div class="search-empty">未找到匹配的地点</div>';
       return;
     }
-    searchResults.innerHTML = "";
-    results.forEach(function (item) {
-      var div = document.createElement("div");
-      div.className = "search-item";
-      var name = item.display_name.split(",")[0];
-      var addr = item.display_name;
-      div.innerHTML = '<div class="name">' + escapeHtml(name) + '</div>' +
-                      '<div class="addr">' + escapeHtml(addr) + '</div>';
-      div.addEventListener("click", function () {
-        var lat = parseFloat(item.lat);
-        var lng = parseFloat(item.lon);
-        map.setView([lat, lng], 16);
-        placeMarker(lat, lng);
-        searchInput.value = name;
-        hideResults();
-      });
-      searchResults.appendChild(div);
-    });
+    renderResults(results);
   })
   .catch(function () {
     searchResults.innerHTML = '<div class="search-empty">搜索请求失败，请检查网络</div>';
   });
+}
+
+function renderResults(results) {
+  searchResults.innerHTML = "";
+  results.forEach(function (item) {
+    var div = document.createElement("div");
+    div.className = "search-item";
+    var name = item.display_name.split(",")[0];
+    var addr = item.display_name;
+    div.innerHTML = '<div class="name">' + escapeHtml(name) + '</div>' +
+                    '<div class="addr">' + escapeHtml(addr) + '</div>';
+    div.addEventListener("click", function () {
+      var lat = parseFloat(item.lat);
+      var lng = parseFloat(item.lon);
+      map.setView([lat, lng], 16);
+      placeMarker(lat, lng);
+      searchInput.value = name;
+      hideResults();
+    });
+    searchResults.appendChild(div);
+  });
+}
+
+/* Debounced input: triggers 500ms after user stops typing */
+searchInput.addEventListener("input", function () {
+  clearTimeout(searchTimer);
+  var keyword = searchInput.value.trim();
+  if (keyword.length < 2) {
+    hideResults();
+    return;
+  }
+  searchTimer = setTimeout(function () { doSearch(keyword); }, 500);
+});
+
+/* Enter also triggers immediate search */
+searchInput.addEventListener("keydown", function (e) {
+  if (e.key !== "Enter") return;
+  clearTimeout(searchTimer);
+  var keyword = searchInput.value.trim();
+  if (!keyword) return;
+  doSearch(keyword);
 });
 
 function escapeHtml(str) {
