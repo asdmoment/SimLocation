@@ -6,7 +6,7 @@
 - 支持 `--pick-only` 模式，仅输出坐标不设置定位，便于脚本集成。
 - 内置 GCJ-02 → WGS-84 坐标转换，确保发送给设备的坐标准确。
 - CLI 重构为子命令模式（`set`/`clear`/`map`），同时保持 `simlocation <lat> <lon>` 和 `simlocation --clear` 的向后兼容。
-- 需要高德 JS API Key（免费申请），通过 `SIMLOCATION_AMAP_KEY` 环境变量配置。
+- 默认使用 OpenStreetMap（零配置即用），配置 `SIMLOCATION_AMAP_KEY` 后自动切换到高德地图。
 
 ## v1.0.1
 
