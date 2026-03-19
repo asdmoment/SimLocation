@@ -12,10 +12,10 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
 #search-box {
   position: absolute;
   top: 16px;
-  left: 16px;
+  right: 16px;
   z-index: 1000;
 }
-#search-box input {
+#search-input {
   width: 320px;
   padding: 10px 14px;
   font-size: 14px;
@@ -26,7 +26,35 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
   outline: none;
   font-family: inherit;
 }
-#search-box input::placeholder { color: #aaa; }
+#search-input::placeholder { color: #aaa; }
+
+#search-results {
+  display: none;
+  margin-top: 4px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.search-item {
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #333;
+  cursor: pointer;
+  border-bottom: 1px solid #f0f0f0;
+  line-height: 1.5;
+}
+.search-item:last-child { border-bottom: none; }
+.search-item:hover { background: #f5f7fa; }
+.search-item .name { font-weight: 500; }
+.search-item .addr { color: #999; font-size: 12px; margin-top: 2px; }
+.search-loading, .search-empty {
+  padding: 12px 14px;
+  font-size: 13px;
+  color: #999;
+  text-align: center;
+}
 
 #panel {
   position: absolute;
@@ -79,7 +107,8 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
 <div id="map"></div>
 
 <div id="search-box">
-  <input id="search-input" type="text" placeholder="搜索地点..." />
+  <input id="search-input" type="text" placeholder="搜索地点，回车查询..." />
+  <div id="search-results"></div>
 </div>
 
 <div id="panel">
@@ -137,24 +166,43 @@ var GCJ = (function () {
 var map, marker, placeSearch;
 var currentWgs = null;
 
-var panelEl     = document.getElementById("panel");
-var coordsEl    = document.getElementById("coords");
-var confirmBtn  = document.getElementById("confirm-btn");
-var doneMsgEl   = document.getElementById("done-msg");
-var searchInput = document.getElementById("search-input");
+var panelEl      = document.getElementById("panel");
+var coordsEl     = document.getElementById("coords");
+var confirmBtn   = document.getElementById("confirm-btn");
+var doneMsgEl    = document.getElementById("done-msg");
+var searchInput  = document.getElementById("search-input");
+var searchResults = document.getElementById("search-results");
+
+/* ---- Search helpers ---- */
+function hideResults() {
+  searchResults.style.display = "none";
+  searchResults.innerHTML = "";
+}
+
+function escapeHtml(str) {
+  var div = document.createElement("div");
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
+}
+
+document.addEventListener("click", function (e) {
+  if (!document.getElementById("search-box").contains(e.target)) {
+    hideResults();
+  }
+});
 
 /* ---- Map init (called by Amap callback) ---- */
 function _onAMapLoaded() {
   map = new AMap.Map("map", {
     zoom: 12,
-    center: [116.397, 39.909],
-    resizeEnable: true
+    center: [116.397, 39.909]
   });
 
   marker = new AMap.Marker({ draggable: true });
 
   map.on("click", function (e) {
     placeMarker(e.lnglat.getLng(), e.lnglat.getLat());
+    hideResults();
   });
 
   marker.on("dragend", function () {
@@ -162,25 +210,43 @@ function _onAMapLoaded() {
     updateCoords(pos.getLng(), pos.getLat());
   });
 
-  /* POI search */
+  /* POI search with candidates */
   AMap.plugin("AMap.PlaceSearch", function () {
-    placeSearch = new AMap.PlaceSearch({ pageSize: 1, pageIndex: 1 });
+    placeSearch = new AMap.PlaceSearch({ pageSize: 8, pageIndex: 1 });
   });
 
   searchInput.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" && placeSearch) {
-      var keyword = searchInput.value.trim();
-      if (!keyword) return;
-      placeSearch.search(keyword, function (status, result) {
-        if (status === "complete" && result.poiList && result.poiList.pois.length) {
-          var poi = result.poiList.pois[0];
+    if (e.key !== "Enter" || !placeSearch) return;
+    var keyword = searchInput.value.trim();
+    if (!keyword) return;
+
+    searchResults.innerHTML = '<div class="search-loading">搜索中...</div>';
+    searchResults.style.display = "block";
+
+    placeSearch.search(keyword, function (status, result) {
+      if (status !== "complete" || !result.poiList || !result.poiList.pois.length) {
+        searchResults.innerHTML = '<div class="search-empty">未找到匹配的地点</div>';
+        return;
+      }
+      searchResults.innerHTML = "";
+      result.poiList.pois.forEach(function (poi) {
+        var div = document.createElement("div");
+        div.className = "search-item";
+        var name = poi.name || "";
+        var addr = poi.address || "";
+        div.innerHTML = '<div class="name">' + escapeHtml(name) + '</div>' +
+                        (addr ? '<div class="addr">' + escapeHtml(addr) + '</div>' : '');
+        div.addEventListener("click", function () {
           var lng = poi.location.getLng();
           var lat = poi.location.getLat();
           map.setZoomAndCenter(15, [lng, lat]);
           placeMarker(lng, lat);
-        }
+          searchInput.value = name;
+          hideResults();
+        });
+        searchResults.appendChild(div);
       });
-    }
+    });
   });
 }
 

@@ -13,10 +13,10 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
 #search-box {
   position: absolute;
   top: 16px;
-  left: 16px;
+  right: 16px;
   z-index: 1000;
 }
-#search-box input {
+#search-input {
   width: 320px;
   padding: 10px 14px;
   font-size: 14px;
@@ -27,7 +27,35 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
   outline: none;
   font-family: inherit;
 }
-#search-box input::placeholder { color: #aaa; }
+#search-input::placeholder { color: #aaa; }
+
+#search-results {
+  display: none;
+  margin-top: 4px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.search-item {
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #333;
+  cursor: pointer;
+  border-bottom: 1px solid #f0f0f0;
+  line-height: 1.5;
+}
+.search-item:last-child { border-bottom: none; }
+.search-item:hover { background: #f5f7fa; }
+.search-item .name { font-weight: 500; }
+.search-item .addr { color: #999; font-size: 12px; margin-top: 2px; }
+.search-loading, .search-empty {
+  padding: 12px 14px;
+  font-size: 13px;
+  color: #999;
+  text-align: center;
+}
 
 #panel {
   position: absolute;
@@ -91,7 +119,8 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
 <div id="map"></div>
 
 <div id="search-box">
-  <input id="search-input" type="text" placeholder="搜索地点（Nominatim）..." />
+  <input id="search-input" type="text" placeholder="搜索地点，回车查询..." />
+  <div id="search-results"></div>
 </div>
 
 <div id="panel">
@@ -108,11 +137,12 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
 var marker = null;
 var currentCoords = null;
 
-var panelEl     = document.getElementById("panel");
-var coordsEl    = document.getElementById("coords");
-var confirmBtn  = document.getElementById("confirm-btn");
-var doneMsgEl   = document.getElementById("done-msg");
-var searchInput = document.getElementById("search-input");
+var panelEl      = document.getElementById("panel");
+var coordsEl     = document.getElementById("coords");
+var confirmBtn   = document.getElementById("confirm-btn");
+var doneMsgEl    = document.getElementById("done-msg");
+var searchInput  = document.getElementById("search-input");
+var searchResults = document.getElementById("search-results");
 
 /* ---- Map init ---- */
 var map = L.map("map").setView([39.909, 116.397], 12);
@@ -125,6 +155,7 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 /* ---- Click to place marker ---- */
 map.on("click", function (e) {
   placeMarker(e.latlng.lat, e.latlng.lng);
+  hideResults();
 });
 
 function placeMarker(lat, lng) {
@@ -152,30 +183,65 @@ function updateCoords(lat, lng) {
   doneMsgEl.style.display = "none";
 }
 
-/* ---- Nominatim search ---- */
+/* ---- Search with candidates ---- */
+function hideResults() {
+  searchResults.style.display = "none";
+  searchResults.innerHTML = "";
+}
+
 searchInput.addEventListener("keydown", function (e) {
   if (e.key !== "Enter") return;
   var keyword = searchInput.value.trim();
   if (!keyword) return;
 
-  fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" +
+  searchResults.innerHTML = '<div class="search-loading">搜索中...</div>';
+  searchResults.style.display = "block";
+
+  fetch("https://nominatim.openstreetmap.org/search?format=json&limit=8&q=" +
         encodeURIComponent(keyword), {
     headers: { "Accept-Language": "zh-CN,zh,en" }
   })
   .then(function (r) { return r.json(); })
   .then(function (results) {
-    if (results && results.length > 0) {
-      var lat = parseFloat(results[0].lat);
-      var lng = parseFloat(results[0].lon);
-      map.setView([lat, lng], 16);
-      placeMarker(lat, lng);
-    } else {
-      alert("未找到匹配的地点。");
+    if (!results || results.length === 0) {
+      searchResults.innerHTML = '<div class="search-empty">未找到匹配的地点</div>';
+      return;
     }
+    searchResults.innerHTML = "";
+    results.forEach(function (item) {
+      var div = document.createElement("div");
+      div.className = "search-item";
+      var name = item.display_name.split(",")[0];
+      var addr = item.display_name;
+      div.innerHTML = '<div class="name">' + escapeHtml(name) + '</div>' +
+                      '<div class="addr">' + escapeHtml(addr) + '</div>';
+      div.addEventListener("click", function () {
+        var lat = parseFloat(item.lat);
+        var lng = parseFloat(item.lon);
+        map.setView([lat, lng], 16);
+        placeMarker(lat, lng);
+        searchInput.value = name;
+        hideResults();
+      });
+      searchResults.appendChild(div);
+    });
   })
   .catch(function () {
-    alert("搜索请求失败，请检查网络。");
+    searchResults.innerHTML = '<div class="search-empty">搜索请求失败，请检查网络</div>';
   });
+});
+
+function escapeHtml(str) {
+  var div = document.createElement("div");
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
+}
+
+/* Close results when clicking outside */
+document.addEventListener("click", function (e) {
+  if (!document.getElementById("search-box").contains(e.target)) {
+    hideResults();
+  }
 });
 
 /* ---- Confirm ---- */
