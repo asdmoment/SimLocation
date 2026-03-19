@@ -56,14 +56,18 @@ pip install pymobiledevice3 requests
 最直接的方式是每次显式传入坐标：
 
 ```bash
-$ simlocation <纬度> <经度>
+$ simlocation set <纬度> <经度>
 ```
+
+> 为了向后兼容，`simlocation <纬度> <经度>`（不带 `set`）也同样有效。
 
 清除模拟定位：
 
 ```bash
-$ simlocation --clear
+$ simlocation clear
 ```
+
+> 为了向后兼容，`simlocation --clear` 也同样有效。
 
 如果你只想在自己电脑上保留一组常用默认值，可以设置：
 
@@ -81,6 +85,37 @@ $ export SIMLOCATION_DEFAULT_LON=<你的经度>
 - `var/simlocation.state.json`
 
 如果你想改位置，可以设置 `SIMLOCATION_VAR_DIR`。
+
+## 地图选点
+
+除了手动输入坐标，你还可以通过浏览器地图来选择位置：
+
+```bash
+$ simlocation map
+```
+
+运行后会在浏览器中打开一个高德地图页面。在地图上点击选择位置，确认后会自动设置虚拟定位。
+
+如果你只想获取坐标而不设置定位（比如用于脚本）：
+
+```bash
+$ simlocation map --pick-only
+```
+
+### 配置高德 Key
+
+地图选点功能需要一个高德 JS API Key（免费）：
+
+1. 前往 [高德开放平台](https://console.amap.com/) 注册或登录
+2. 进入「应用管理」→「我的应用」→ 创建新应用
+3. 为应用添加一个 Key，服务平台选择「Web端(JS API)」
+4. 复制 Key，设置环境变量：
+
+```bash
+$ export SIMLOCATION_AMAP_KEY=你的Key
+```
+
+建议将上面这行加入 `~/.zshrc` 或 `~/.bashrc` 以便长期使用。
 
 ## 局限性
 
