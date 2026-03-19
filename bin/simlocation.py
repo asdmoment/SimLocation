@@ -1090,14 +1090,10 @@ def cmd_device_default(name=None):
         else:
             print("[*] 未设置默认设备。")
         return
-    if name in devices_data["aliases"] or len(name) > 8:
-        devices_data["default"] = name
-        write_devices(devices_data)
-        udid = resolve_alias(name, devices_data)
-        print(f"[+] 默认设备已设置为: {name}" + (f" ({udid})" if name != udid else ""))
-    else:
-        print(f"[!] 未知的别名或 UDID: {name}")
-        sys.exit(1)
+    devices_data["default"] = name
+    write_devices(devices_data)
+    udid = resolve_alias(name, devices_data)
+    print(f"[+] 默认设备已设置为: {name}" + (f" ({udid})" if name != udid else ""))
 
 
 def cmd_status(pmd3_bin, log_path=None):
@@ -1110,7 +1106,7 @@ def cmd_clear_all(pmd3_bin, connection_mode="auto", log_path=None):
     for sf in state_files:
         state = read_state(sf)
         if state and state.get("status") == "ready":
-            udid = sf.stem
+            udid = sf.name.removesuffix(".state.json")
             active.append(udid)
 
     if not active:
