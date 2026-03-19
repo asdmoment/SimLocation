@@ -1017,6 +1017,111 @@ def parse_args():
     return args
 
 
+def cmd_device_list(pmd3_bin, log_path=None):
+    devices_data = read_devices()
+    default = devices_data.get("default")
+    default_udid = resolve_alias(default, devices_data) if default else None
+
+    discovered = discover_devices(pmd3_bin, log_path)
+    known_udids = set(devices_data["aliases"].values())
+    all_udids = sorted(set(discovered) | known_udids)
+
+    if not all_udids:
+        print("[*] 未发现任何设备。请检查设备连接和 tunneld 状态。")
+        return
+
+    print(f"  {'UDID':<40} {'别名':<12} {'默认':<6} {'状态'}")
+    print(f"  {'─' * 40} {'─' * 12} {'─' * 6} {'─' * 20}")
+    for udid in all_udids:
+        alias = reverse_alias(udid, devices_data) or "—"
+        is_default = "✓" if udid == default_udid else "—"
+        state = read_state(state_path_for(udid))
+        if state and state.get("status") == "ready":
+            lat = state.get("lat", "?")
+            lon = state.get("lon", "?")
+            status_str = f"ready ({lat}, {lon})"
+        elif state and state.get("status") == "error":
+            status_str = "error"
+        else:
+            status_str = "—"
+        print(f"  {udid:<40} {alias:<12} {is_default:<6} {status_str}")
+
+
+def cmd_device_add(alias, udid, pmd3_bin, log_path=None):
+    devices_data = read_devices()
+    if not udid:
+        discovered = discover_devices(pmd3_bin, log_path)
+        if not discovered:
+            print("[!] 未发现任何设备。请连接设备后重试。")
+            sys.exit(1)
+        if len(discovered) == 1:
+            udid = discovered[0]
+        else:
+            udid = interactive_device_select(discovered, devices_data, log_path)
+    devices_data["aliases"][alias] = udid
+    write_devices(devices_data)
+    print(f"[+] 已注册别名: {alias} → {udid}")
+
+
+def cmd_device_remove(alias):
+    devices_data = read_devices()
+    if alias not in devices_data["aliases"]:
+        print(f"[!] 别名不存在: {alias}")
+        sys.exit(1)
+    del devices_data["aliases"][alias]
+    if devices_data.get("default") == alias:
+        devices_data["default"] = None
+        print(f"[*] 默认设备已清除（之前指向已删除的别名 {alias}）。")
+    write_devices(devices_data)
+    print(f"[+] 已删除别名: {alias}")
+
+
+def cmd_device_default(name=None):
+    devices_data = read_devices()
+    if name is None:
+        default = devices_data.get("default")
+        if default:
+            udid = resolve_alias(default, devices_data)
+            alias = reverse_alias(udid, devices_data)
+            if alias:
+                print(f"[*] 当前默认设备: {alias} ({udid})")
+            else:
+                print(f"[*] 当前默认设备: {udid}")
+        else:
+            print("[*] 未设置默认设备。")
+        return
+    if name in devices_data["aliases"] or len(name) > 8:
+        devices_data["default"] = name
+        write_devices(devices_data)
+        udid = resolve_alias(name, devices_data)
+        print(f"[+] 默认设备已设置为: {name}" + (f" ({udid})" if name != udid else ""))
+    else:
+        print(f"[!] 未知的别名或 UDID: {name}")
+        sys.exit(1)
+
+
+def cmd_status(pmd3_bin, log_path=None):
+    cmd_device_list(pmd3_bin, log_path)
+
+
+def cmd_clear_all(pmd3_bin, connection_mode="auto", log_path=None):
+    state_files = sorted(RUNTIME_DIR.glob("*.state.json"))
+    active = []
+    for sf in state_files:
+        state = read_state(sf)
+        if state and state.get("status") == "ready":
+            udid = sf.stem
+            active.append(udid)
+
+    if not active:
+        print("[*] 没有活跃的定位会话。")
+        return
+
+    for udid in active:
+        print(f"[*] 正在清除设备 {udid} 的虚拟定位...")
+        clear_location(pmd3_bin, connection_mode, log_path, udid=udid)
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -1047,8 +1152,25 @@ if __name__ == "__main__":
 
     device_flag = getattr(args, "device", None)
 
-    if args.command == "clear":
-        clear_location(pmd3_bin, args.connection, log_path, device_flag=device_flag)
+    if args.command == "status":
+        cmd_status(pmd3_bin, log_path)
+    elif args.command == "device":
+        dc = getattr(args, "device_command", None)
+        if dc == "list":
+            cmd_device_list(pmd3_bin, log_path)
+        elif dc == "add":
+            cmd_device_add(args.alias, getattr(args, "udid", None), pmd3_bin, log_path)
+        elif dc == "remove":
+            cmd_device_remove(args.alias)
+        elif dc == "default":
+            cmd_device_default(getattr(args, "name", None))
+        else:
+            cmd_device_list(pmd3_bin, log_path)
+    elif args.command == "clear":
+        if getattr(args, "clear_all", False):
+            cmd_clear_all(pmd3_bin, args.connection, log_path)
+        else:
+            clear_location(pmd3_bin, args.connection, log_path, device_flag=device_flag)
     elif args.command == "map":
         amap_key = os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() or None
         if not amap_key:
