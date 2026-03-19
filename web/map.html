@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SimLocation - Map Picker</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #map { width: 100%; height: 100%; }
+body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
+
+#search-box {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 1000;
+}
+#search-box input {
+  width: 320px;
+  padding: 10px 14px;
+  font-size: 14px;
+  border: none;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  outline: none;
+  font-family: inherit;
+}
+#search-box input::placeholder { color: #aaa; }
+
+#panel {
+  position: absolute;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+  padding: 16px 24px;
+  min-width: 340px;
+  text-align: center;
+  display: none;
+}
+#coords {
+  font-size: 13px;
+  color: #333;
+  line-height: 1.8;
+  margin-bottom: 12px;
+}
+#coords .label {
+  color: #888;
+  font-size: 12px;
+}
+#confirm-btn {
+  display: inline-block;
+  padding: 10px 36px;
+  font-size: 15px;
+  color: #fff;
+  background: #1677ff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.2s;
+}
+#confirm-btn:hover { background: #0958d9; }
+#confirm-btn:active { background: #003eb3; }
+#done-msg {
+  display: none;
+  font-size: 15px;
+  color: #52c41a;
+  padding: 10px 0 2px;
+}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="search-box">
+  <input id="search-input" type="text" placeholder="搜索地点..." />
+</div>
+
+<div id="panel">
+  <div id="coords"></div>
+  <button id="confirm-btn">确认位置</button>
+  <div id="done-msg">已提交</div>
+</div>
+
+<script>
+/* ---- GCJ-02 to WGS-84 conversion ---- */
+var GCJ = (function () {
+  var A  = 6378245.0;
+  var EE = 0.00669342162296594323;
+  var PI = Math.PI;
+
+  function outOfChina(lng, lat) {
+    return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+  }
+
+  function transformLat(x, y) {
+    var r = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y +
+            0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+    r += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
+    r += (20.0 * Math.sin(y * PI) + 40.0 * Math.sin(y / 3.0 * PI)) * 2.0 / 3.0;
+    r += (160.0 * Math.sin(y / 12.0 * PI) + 320.0 * Math.sin(y * PI / 30.0)) * 2.0 / 3.0;
+    return r;
+  }
+
+  function transformLng(x, y) {
+    var r = 300.0 + x + 2.0 * y + 0.1 * x * x +
+            0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+    r += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
+    r += (20.0 * Math.sin(x * PI) + 40.0 * Math.sin(x / 3.0 * PI)) * 2.0 / 3.0;
+    r += (150.0 * Math.sin(x / 12.0 * PI) + 300.0 * Math.sin(x / 30.0 * PI)) * 2.0 / 3.0;
+    return r;
+  }
+
+  function gcj02ToWgs84(lng, lat) {
+    if (outOfChina(lng, lat)) return { lng: lng, lat: lat };
+    var dLat = transformLat(lng - 105.0, lat - 35.0);
+    var dLng = transformLng(lng - 105.0, lat - 35.0);
+    var radLat = lat / 180.0 * PI;
+    var magic  = Math.sin(radLat);
+    magic = 1 - EE * magic * magic;
+    var sqrtMagic = Math.sqrt(magic);
+    dLat = (dLat * 180.0) / ((A * (1 - EE)) / (magic * sqrtMagic) * PI);
+    dLng = (dLng * 180.0) / (A / sqrtMagic * Math.cos(radLat) * PI);
+    return { lng: lng - dLng, lat: lat - dLat };
+  }
+
+  return { toWgs84: gcj02ToWgs84 };
+})();
+
+/* ---- App state ---- */
+var map, marker, placeSearch;
+var currentWgs = null;
+
+var panelEl     = document.getElementById("panel");
+var coordsEl    = document.getElementById("coords");
+var confirmBtn  = document.getElementById("confirm-btn");
+var doneMsgEl   = document.getElementById("done-msg");
+var searchInput = document.getElementById("search-input");
+
+/* ---- Map init (called by Amap callback) ---- */
+function _onAMapLoaded() {
+  map = new AMap.Map("map", {
+    zoom: 12,
+    center: [116.397, 39.909],
+    resizeEnable: true
+  });
+
+  marker = new AMap.Marker({ draggable: true });
+
+  map.on("click", function (e) {
+    placeMarker(e.lnglat.getLng(), e.lnglat.getLat());
+  });
+
+  marker.on("dragend", function () {
+    var pos = marker.getPosition();
+    updateCoords(pos.getLng(), pos.getLat());
+  });
+
+  /* POI search */
+  AMap.plugin("AMap.PlaceSearch", function () {
+    placeSearch = new AMap.PlaceSearch({ pageSize: 1, pageIndex: 1 });
+  });
+
+  searchInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && placeSearch) {
+      var keyword = searchInput.value.trim();
+      if (!keyword) return;
+      placeSearch.search(keyword, function (status, result) {
+        if (status === "complete" && result.poiList && result.poiList.pois.length) {
+          var poi = result.poiList.pois[0];
+          var lng = poi.location.getLng();
+          var lat = poi.location.getLat();
+          map.setZoomAndCenter(15, [lng, lat]);
+          placeMarker(lng, lat);
+        }
+      });
+    }
+  });
+}
+
+function placeMarker(lng, lat) {
+  marker.setPosition([lng, lat]);
+  marker.setMap(map);
+  updateCoords(lng, lat);
+}
+
+function updateCoords(gcjLng, gcjLat) {
+  var wgs = GCJ.toWgs84(gcjLng, gcjLat);
+  currentWgs = wgs;
+
+  coordsEl.innerHTML =
+    '<span class="label">GCJ-02:</span> ' +
+    gcjLng.toFixed(6) + ", " + gcjLat.toFixed(6) + "<br>" +
+    '<span class="label">WGS-84:</span> ' +
+    wgs.lng.toFixed(6) + ", " + wgs.lat.toFixed(6);
+
+  panelEl.style.display = "block";
+  confirmBtn.style.display = "inline-block";
+  doneMsgEl.style.display = "none";
+}
+
+/* ---- Confirm ---- */
+confirmBtn.addEventListener("click", function () {
+  if (!currentWgs) return;
+  confirmBtn.disabled = true;
+
+  var xhr = new XMLHttpRequest();
+  xhr.open("POST", "http://127.0.0.1:{{PORT}}/confirm", true);
+  xhr.setRequestHeader("Content-Type", "application/json");
+  xhr.onreadystatechange = function () {
+    if (xhr.readyState === 4) {
+      confirmBtn.style.display = "none";
+      doneMsgEl.style.display = "block";
+    }
+  };
+  xhr.send(JSON.stringify({ lat: currentWgs.lat, lon: currentWgs.lng }));
+});
+
+/* ---- Load Amap JS API ---- */
+var s = document.createElement("script");
+s.src = "https://webapi.amap.com/maps?v=2.0&key={{AMAP_KEY}}&callback=_onAMapLoaded";
+document.head.appendChild(s);
+</script>
+
+</body>
+</html>
