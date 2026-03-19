@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SimLocation - Map Picker (OpenStreetMap)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #map { width: 100%; height: 100%; }
+body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
+
+#search-box {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 1000;
+}
+#search-box input {
+  width: 320px;
+  padding: 10px 14px;
+  font-size: 14px;
+  border: none;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  outline: none;
+  font-family: inherit;
+}
+#search-box input::placeholder { color: #aaa; }
+
+#panel {
+  position: absolute;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+  padding: 16px 24px;
+  min-width: 340px;
+  text-align: center;
+  display: none;
+}
+#coords {
+  font-size: 13px;
+  color: #333;
+  line-height: 1.8;
+  margin-bottom: 12px;
+}
+#coords .label {
+  color: #888;
+  font-size: 12px;
+}
+#confirm-btn {
+  display: inline-block;
+  padding: 10px 36px;
+  font-size: 15px;
+  color: #fff;
+  background: #1677ff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.2s;
+}
+#confirm-btn:hover { background: #0958d9; }
+#confirm-btn:active { background: #003eb3; }
+#done-msg {
+  display: none;
+  font-size: 15px;
+  color: #52c41a;
+  padding: 10px 0 2px;
+}
+#provider-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 1000;
+  background: rgba(0,0,0,0.5);
+  color: #fff;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="search-box">
+  <input id="search-input" type="text" placeholder="搜索地点（Nominatim）..." />
+</div>
+
+<div id="panel">
+  <div id="coords"></div>
+  <button id="confirm-btn">确认位置</button>
+  <div id="done-msg">已提交</div>
+</div>
+
+<div id="provider-badge">OpenStreetMap</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/* ---- App state ---- */
+var marker = null;
+var currentCoords = null;
+
+var panelEl     = document.getElementById("panel");
+var coordsEl    = document.getElementById("coords");
+var confirmBtn  = document.getElementById("confirm-btn");
+var doneMsgEl   = document.getElementById("done-msg");
+var searchInput = document.getElementById("search-input");
+
+/* ---- Map init ---- */
+var map = L.map("map").setView([39.909, 116.397], 12);
+
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+}).addTo(map);
+
+/* ---- Click to place marker ---- */
+map.on("click", function (e) {
+  placeMarker(e.latlng.lat, e.latlng.lng);
+});
+
+function placeMarker(lat, lng) {
+  if (marker) {
+    marker.setLatLng([lat, lng]);
+  } else {
+    marker = L.marker([lat, lng], { draggable: true }).addTo(map);
+    marker.on("dragend", function () {
+      var pos = marker.getLatLng();
+      updateCoords(pos.lat, pos.lng);
+    });
+  }
+  updateCoords(lat, lng);
+}
+
+function updateCoords(lat, lng) {
+  currentCoords = { lat: lat, lon: lng };
+
+  coordsEl.innerHTML =
+    '<span class="label">WGS-84:</span> ' +
+    lat.toFixed(6) + ", " + lng.toFixed(6);
+
+  panelEl.style.display = "block";
+  confirmBtn.style.display = "inline-block";
+  doneMsgEl.style.display = "none";
+}
+
+/* ---- Nominatim search ---- */
+searchInput.addEventListener("keydown", function (e) {
+  if (e.key !== "Enter") return;
+  var keyword = searchInput.value.trim();
+  if (!keyword) return;
+
+  fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" +
+        encodeURIComponent(keyword), {
+    headers: { "Accept-Language": "zh-CN,zh,en" }
+  })
+  .then(function (r) { return r.json(); })
+  .then(function (results) {
+    if (results && results.length > 0) {
+      var lat = parseFloat(results[0].lat);
+      var lng = parseFloat(results[0].lon);
+      map.setView([lat, lng], 16);
+      placeMarker(lat, lng);
+    } else {
+      alert("未找到匹配的地点。");
+    }
+  })
+  .catch(function () {
+    alert("搜索请求失败，请检查网络。");
+  });
+});
+
+/* ---- Confirm ---- */
+confirmBtn.addEventListener("click", function () {
+  if (!currentCoords) return;
+  confirmBtn.disabled = true;
+
+  var xhr = new XMLHttpRequest();
+  xhr.open("POST", "http://127.0.0.1:{{PORT}}/confirm", true);
+  xhr.setRequestHeader("Content-Type", "application/json");
+  xhr.onreadystatechange = function () {
+    if (xhr.readyState === 4) {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        confirmBtn.style.display = "none";
+        doneMsgEl.style.display = "block";
+      } else {
+        confirmBtn.disabled = false;
+        alert("提交失败，请重试。");
+      }
+    }
+  };
+  xhr.onerror = function () {
+    confirmBtn.disabled = false;
+    alert("无法连接到本地服务，请检查终端。");
+  };
+  xhr.send(JSON.stringify(currentCoords));
+});
+</script>
+
+</body>
+</html>
