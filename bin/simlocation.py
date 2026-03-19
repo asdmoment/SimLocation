@@ -62,6 +62,50 @@ DEFAULT_STATE_PATH = RUNTIME_DIR / "simlocation.state.json"
 HOLD_START_TIMEOUT_SECONDS = 12
 HOLD_POLL_INTERVAL_SECONDS = 0.25
 
+DEFAULT_DEVICES_PATH = RUNTIME_DIR / "devices.json"
+
+
+def read_devices(devices_path=DEFAULT_DEVICES_PATH):
+    if not devices_path.exists():
+        return {"default": None, "aliases": {}}
+    try:
+        data = json.loads(devices_path.read_text(encoding="utf-8"))
+        if "aliases" not in data:
+            data["aliases"] = {}
+        if "default" not in data:
+            data["default"] = None
+        return data
+    except (OSError, json.JSONDecodeError):
+        return {"default": None, "aliases": {}}
+
+
+def write_devices(data, devices_path=DEFAULT_DEVICES_PATH):
+    devices_path.parent.mkdir(parents=True, exist_ok=True)
+    devices_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def resolve_alias(name, devices_data):
+    """Resolve an alias or UDID string to a UDID. Returns the input unchanged if not an alias."""
+    return devices_data["aliases"].get(name, name)
+
+
+def reverse_alias(udid, devices_data):
+    """Find the alias for a UDID, or return None."""
+    for alias, u in devices_data["aliases"].items():
+        if u == udid:
+            return alias
+    return None
+
+
+def pid_path_for(udid):
+    return RUNTIME_DIR / f"{udid}.pid"
+
+
+def state_path_for(udid):
+    return RUNTIME_DIR / f"{udid}.state.json"
+
 
 def log_message(message, log_path=None):
     print(message)
@@ -401,13 +445,13 @@ def build_location_command(pmd3_bin, action, lat=None, lon=None, rsd_pair=None):
 async def _execute_dvt_location_action(rsd_pair, action, lat=None, lon=None):
     async with RemoteServiceDiscoveryService((rsd_pair[0], int(rsd_pair[1]))) as rsd:
         async with DvtSecureSocketProxyService(rsd) as dvt:
-            simulation = LocationSimulation(dvt)
-            if action == "set":
-                if lat is None or lon is None:
-                    raise ValueError("set action requires both lat and lon")
-                await simulation.set(float(lat), float(lon))
-            else:
-                await simulation.clear()
+            async with LocationSimulation(dvt) as simulation:
+                if action == "set":
+                    if lat is None or lon is None:
+                        raise ValueError("set action requires both lat and lon")
+                    await simulation.set(float(lat), float(lon))
+                else:
+                    await simulation.clear()
 
 
 def execute_dvt_location_action(rsd_pair, action, lat=None, lon=None, log_path=None):
@@ -434,26 +478,26 @@ async def _hold_dvt_location_session(rsd_pair, lat, lon, state_path, log_path=No
 
     async with RemoteServiceDiscoveryService((rsd_pair[0], int(rsd_pair[1]))) as rsd:
         async with DvtSecureSocketProxyService(rsd) as dvt:
-            simulation = LocationSimulation(dvt)
-            await simulation.set(float(lat), float(lon))
-            write_state(
-                state_path,
-                {
-                    "status": "ready",
-                    "pid": os.getpid(),
-                    "rsd_address": rsd_pair[0],
-                    "rsd_port": rsd_pair[1],
-                    "lat": str(lat),
-                    "lon": str(lon),
-                    "started_at": datetime.now().isoformat(timespec="seconds"),
-                },
-            )
-            log_message(
-                "[+] 后台定位会话已建立，将持续保持当前位置直到执行 clear。", log_path
-            )
-            await stop_event.wait()
-            with suppress(Exception):
-                await simulation.clear()
+            async with LocationSimulation(dvt) as simulation:
+                await simulation.set(float(lat), float(lon))
+                write_state(
+                    state_path,
+                    {
+                        "status": "ready",
+                        "pid": os.getpid(),
+                        "rsd_address": rsd_pair[0],
+                        "rsd_port": rsd_pair[1],
+                        "lat": str(lat),
+                        "lon": str(lon),
+                        "started_at": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+                log_message(
+                    "[+] 后台定位会话已建立，将持续保持当前位置直到执行 clear。", log_path
+                )
+                await stop_event.wait()
+                with suppress(Exception):
+                    await simulation.clear()
 
 
 def run_hold_session(
@@ -516,9 +560,6 @@ def start_hold_session(
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
-        "set",
-        str(lat),
-        str(lon),
         "--connection",
         connection_mode,
         "--pid-file",
@@ -529,6 +570,7 @@ def start_hold_session(
     ]
     if log_path:
         cmd.extend(["--debug", "--log-file", str(log_path)])
+    cmd.extend(["set", str(lat), str(lon)])
     child_env = os.environ.copy()
     child_env["SIMLOCATION_UDID"] = udid
 
