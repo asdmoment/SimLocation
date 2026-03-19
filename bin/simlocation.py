@@ -651,22 +651,17 @@ def clear_location(
     sys.exit(1)
 
 
-AMAP_KEY_GUIDE = """\
-[!] 未设置高德地图 Key。
-
-  使用地图选点功能需要一个免费的高德 JS API Key：
+AMAP_KEY_HINT = """\
+[*] 提示：当前使用 OpenStreetMap 地图。如需更精细的中国地图，可配置高德 Key：
 
   1. 前往 https://console.amap.com/ 注册/登录
   2. 进入「应用管理」→「我的应用」→「创建新应用」
   3. 为应用添加一个 Key，服务平台选择「Web端(JS API)」
-  4. 复制 Key，在终端中设置环境变量：
-
-     export SIMLOCATION_AMAP_KEY=你的Key
-
-  设置完成后重新运行 simlocation map。
+  4. 设置环境变量：export SIMLOCATION_AMAP_KEY=你的Key
 """
 
-MAP_HTML_PATH = PROJECT_DIR / "web" / "map.html"
+MAP_AMAP_HTML_PATH = PROJECT_DIR / "web" / "map-amap.html"
+MAP_OSM_HTML_PATH = PROJECT_DIR / "web" / "map-osm.html"
 MAP_SERVER_TIMEOUT_SECONDS = 300
 
 
@@ -716,21 +711,30 @@ class _MapRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-def run_map_picker(amap_key):
-    if not MAP_HTML_PATH.is_file():
-        print(f"[!] 地图页面文件不存在: {MAP_HTML_PATH}")
+def run_map_picker(amap_key=None):
+    if amap_key:
+        html_path = MAP_AMAP_HTML_PATH
+        provider = "高德地图"
+    else:
+        html_path = MAP_OSM_HTML_PATH
+        provider = "OpenStreetMap"
+
+    if not html_path.is_file():
+        print(f"[!] 地图页面文件不存在: {html_path}")
         sys.exit(1)
-    template = MAP_HTML_PATH.read_text(encoding="utf-8")
+    template = html_path.read_text(encoding="utf-8")
 
     server = HTTPServer(("127.0.0.1", 0), _MapRequestHandler)
     port = server.server_address[1]
-    html_text = template.replace("{{AMAP_KEY}}", amap_key).replace("{{PORT}}", str(port))
+    html_text = template.replace("{{PORT}}", str(port))
+    if amap_key:
+        html_text = html_text.replace("{{AMAP_KEY}}", amap_key)
     server.map_html = html_text.encode("utf-8")
     server.picked_coords = None
 
     url = f"http://127.0.0.1:{port}/"
-    print(f"[*] 地图选点服务已启动: {url}")
-    print("[*] 正在打开浏览器，请在地图上选择位置后点击「确认选点」。")
+    print(f"[*] 地图选点服务已启动 ({provider}): {url}")
+    print("[*] 正在打开浏览器，请在地图上选择位置后点击「确认」。")
     webbrowser.open(url)
 
     timer = threading.Timer(MAP_SERVER_TIMEOUT_SECONDS, server.shutdown)
@@ -872,10 +876,9 @@ if __name__ == "__main__":
     if args.command == "clear":
         clear_location(pmd3_bin, args.connection, log_path, pid_path, state_path)
     elif args.command == "map":
-        amap_key = os.environ.get("SIMLOCATION_AMAP_KEY", "").strip()
+        amap_key = os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() or None
         if not amap_key:
-            print(AMAP_KEY_GUIDE)
-            sys.exit(1)
+            print(AMAP_KEY_HINT)
         coords = run_map_picker(amap_key)
         if coords is None:
             print("[-] 未选择坐标（超时或关闭了浏览器）。")
