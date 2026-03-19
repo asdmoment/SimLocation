@@ -56,23 +56,23 @@ pip install pymobiledevice3 requests
 最直接的方式是每次显式传入坐标：
 
 ```bash
-bin/simlocation <纬度> <经度>
+$ simlocation <纬度> <经度>
 ```
 
 清除模拟定位：
 
 ```bash
-bin/simlocation --clear
+$ simlocation --clear
 ```
 
 如果你只想在自己电脑上保留一组常用默认值，可以设置：
 
 ```bash
-export SIMLOCATION_DEFAULT_LAT=<你的纬度>
-export SIMLOCATION_DEFAULT_LON=<你的经度>
+$ export SIMLOCATION_DEFAULT_LAT=<你的纬度>
+$ export SIMLOCATION_DEFAULT_LON=<你的经度>
 ```
 
-设置后，执行 `bin/simlocation` 时可以不再重复输入经纬度；如果没有提供命令行坐标，程序会读取这两个环境变量。
+设置后，执行 `simlocation` 时可以不再重复输入经纬度；如果没有提供命令行坐标，程序会读取这两个环境变量。
 
 运行时文件默认放在 `var/` 下，包括：
 
