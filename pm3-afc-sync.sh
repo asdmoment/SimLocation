@@ -1,1 +1,0 @@
-tools/pm3-afc-sync.sh
