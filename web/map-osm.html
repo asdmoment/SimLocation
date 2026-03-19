@@ -195,41 +195,40 @@ function doSearch(keyword) {
   searchResults.innerHTML = '<div class="search-loading">搜索中...</div>';
   searchResults.style.display = "block";
 
-  fetch("https://nominatim.openstreetmap.org/search?format=json&limit=8&addressdetails=1&q=" +
-        encodeURIComponent(keyword), {
-    headers: { "Accept-Language": "zh-CN,zh,en" }
-  })
+  /* Use Photon (Komoot) for better autocomplete results from OSM data */
+  fetch("https://photon.komoot.io/api/?q=" + encodeURIComponent(keyword) + "&limit=8&lang=zh", {})
   .then(function (r) { return r.json(); })
-  .then(function (results) {
-    if (!results || results.length === 0) {
+  .then(function (data) {
+    var features = data && data.features;
+    if (!features || features.length === 0) {
       searchResults.innerHTML = '<div class="search-empty">未找到匹配的地点</div>';
       return;
     }
-    renderResults(results);
+    searchResults.innerHTML = "";
+    features.forEach(function (f) {
+      var props = f.properties || {};
+      var coords = f.geometry && f.geometry.coordinates;
+      if (!coords) return;
+      var div = document.createElement("div");
+      div.className = "search-item";
+      var name = props.name || props.street || "未命名";
+      var parts = [props.city, props.state, props.country].filter(Boolean);
+      var addr = parts.join(", ");
+      div.innerHTML = '<div class="name">' + escapeHtml(name) + '</div>' +
+                      (addr ? '<div class="addr">' + escapeHtml(addr) + '</div>' : '');
+      div.addEventListener("click", function () {
+        var lng = coords[0];
+        var lat = coords[1];
+        map.setView([lat, lng], 16);
+        placeMarker(lat, lng);
+        searchInput.value = name;
+        hideResults();
+      });
+      searchResults.appendChild(div);
+    });
   })
   .catch(function () {
     searchResults.innerHTML = '<div class="search-empty">搜索请求失败，请检查网络</div>';
-  });
-}
-
-function renderResults(results) {
-  searchResults.innerHTML = "";
-  results.forEach(function (item) {
-    var div = document.createElement("div");
-    div.className = "search-item";
-    var name = item.display_name.split(",")[0];
-    var addr = item.display_name;
-    div.innerHTML = '<div class="name">' + escapeHtml(name) + '</div>' +
-                    '<div class="addr">' + escapeHtml(addr) + '</div>';
-    div.addEventListener("click", function () {
-      var lat = parseFloat(item.lat);
-      var lng = parseFloat(item.lon);
-      map.setView([lat, lng], 16);
-      placeMarker(lat, lng);
-      searchInput.value = name;
-      hideResults();
-    });
-    searchResults.appendChild(div);
   });
 }
 
@@ -279,6 +278,7 @@ confirmBtn.addEventListener("click", function () {
       if (xhr.status >= 200 && xhr.status < 300) {
         confirmBtn.style.display = "none";
         doneMsgEl.style.display = "block";
+        setTimeout(function () { window.close(); }, 600);
       } else {
         confirmBtn.disabled = false;
         alert("提交失败，请重试。");

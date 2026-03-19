@@ -320,6 +320,7 @@ confirmBtn.addEventListener("click", function () {
       if (xhr.status >= 200 && xhr.status < 300) {
         confirmBtn.style.display = "none";
         doneMsgEl.style.display = "block";
+        setTimeout(function () { window.close(); }, 600);
       } else {
         confirmBtn.disabled = false;
         alert("提交失败，请重试。");
