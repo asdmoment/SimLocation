@@ -195,30 +195,27 @@ function doSearch(keyword) {
   searchResults.innerHTML = '<div class="search-loading">搜索中...</div>';
   searchResults.style.display = "block";
 
-  /* Use Photon (Komoot) for better autocomplete results from OSM data */
-  fetch("https://photon.komoot.io/api/?q=" + encodeURIComponent(keyword) + "&limit=8&lang=zh", {})
+  fetch("https://nominatim.openstreetmap.org/search?format=json&limit=8&dedupe=0&addressdetails=1&q=" +
+        encodeURIComponent(keyword), {
+    headers: { "Accept-Language": "zh-CN,zh,en" }
+  })
   .then(function (r) { return r.json(); })
-  .then(function (data) {
-    var features = data && data.features;
-    if (!features || features.length === 0) {
+  .then(function (results) {
+    if (!results || results.length === 0) {
       searchResults.innerHTML = '<div class="search-empty">未找到匹配的地点</div>';
       return;
     }
     searchResults.innerHTML = "";
-    features.forEach(function (f) {
-      var props = f.properties || {};
-      var coords = f.geometry && f.geometry.coordinates;
-      if (!coords) return;
+    results.forEach(function (item) {
       var div = document.createElement("div");
       div.className = "search-item";
-      var name = props.name || props.street || "未命名";
-      var parts = [props.city, props.state, props.country].filter(Boolean);
-      var addr = parts.join(", ");
+      var name = item.display_name.split(",")[0];
+      var addr = item.display_name;
       div.innerHTML = '<div class="name">' + escapeHtml(name) + '</div>' +
-                      (addr ? '<div class="addr">' + escapeHtml(addr) + '</div>' : '');
+                      '<div class="addr">' + escapeHtml(addr) + '</div>';
       div.addEventListener("click", function () {
-        var lng = coords[0];
-        var lat = coords[1];
+        var lat = parseFloat(item.lat);
+        var lng = parseFloat(item.lon);
         map.setView([lat, lng], 16);
         placeMarker(lat, lng);
         searchInput.value = name;
