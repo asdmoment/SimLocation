@@ -619,10 +619,11 @@ def run_hold_session(
 
 
 def start_hold_session(
-    lat, lon, pmd3_bin, connection_mode, pid_path, state_path, log_path=None
+    lat, lon, pmd3_bin, connection_mode, udid, log_path=None
 ):
+    pid_path = pid_path_for(udid)
+    state_path = state_path_for(udid)
     stop_hold_session(pid_path, state_path, log_path, quiet=True)
-    udid = resolve_device_udid(pmd3_bin, log_path)
 
     cmd = [
         sys.executable,
@@ -685,22 +686,16 @@ def start_hold_session(
 
 
 def auto_set_location(
-    lat,
-    lon,
-    pmd3_bin,
-    connection_mode="auto",
-    log_path=None,
-    pid_path=DEFAULT_PID_PATH,
-    state_path=DEFAULT_STATE_PATH,
+    lat, lon, pmd3_bin, connection_mode="auto", log_path=None, udid=None, device_flag=None,
 ):
+    if not udid:
+        udid = resolve_device_udid(pmd3_bin, log_path, device_flag=device_flag)
     message = (
-        f"[*] 正在启动后台定位会话，连接模式: {connection_mode}。\n"
+        f"[*] 正在启动后台定位会话，连接模式: {connection_mode}，设备: {udid}。\n"
         f"[*] 后台进程会持续保持 DVT 会话，直到执行 clear。"
     )
     log_message(message, log_path)
-    if start_hold_session(
-        lat, lon, pmd3_bin, connection_mode, pid_path, state_path, log_path
-    ):
+    if start_hold_session(lat, lon, pmd3_bin, connection_mode, udid, log_path):
         log_message("[+] 虚拟定位设置成功，后台保持会话已启动。", log_path)
         return
     log_message("[-] 后台定位会话启动失败。", log_path)
@@ -708,14 +703,13 @@ def auto_set_location(
 
 
 def clear_location(
-    pmd3_bin,
-    connection_mode="auto",
-    log_path=None,
-    pid_path=DEFAULT_PID_PATH,
-    state_path=DEFAULT_STATE_PATH,
+    pmd3_bin, connection_mode="auto", log_path=None, udid=None, device_flag=None,
 ):
+    if not udid:
+        udid = resolve_device_udid(pmd3_bin, log_path, device_flag=device_flag)
+    pid_path = pid_path_for(udid)
+    state_path = state_path_for(udid)
     stop_hold_session(pid_path, state_path, log_path, quiet=False)
-    udid = resolve_device_udid(pmd3_bin, log_path)
     for attempt in range(1, COMMAND_RETRIES + 1):
         if connection_mode == "auto":
             rsd_pair = request_fresh_rsd(udid, log_path)
@@ -1002,8 +996,6 @@ if __name__ == "__main__":
 
     pmd3_bin = resolve_pymobiledevice3()
     log_path = Path(args.log_file) if args.debug else None
-    pid_path = Path(args.pid_file)
-    state_path = Path(args.state_file)
 
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1014,6 +1006,8 @@ if __name__ == "__main__":
         log_message(f"[*] tunneld URL: {TUNNELD_URL}", log_path)
 
     if args._hold_session:
+        pid_path = Path(args.pid_file)
+        state_path = Path(args.state_file)
         run_hold_session(
             args.lat,
             args.lon,
@@ -1025,8 +1019,10 @@ if __name__ == "__main__":
         )
         sys.exit(0)
 
+    device_flag = getattr(args, "device", None)
+
     if args.command == "clear":
-        clear_location(pmd3_bin, args.connection, log_path, pid_path, state_path)
+        clear_location(pmd3_bin, args.connection, log_path, device_flag=device_flag)
     elif args.command == "map":
         amap_key = os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() or None
         if not amap_key:
@@ -1046,8 +1042,7 @@ if __name__ == "__main__":
                 pmd3_bin,
                 args.connection,
                 log_path,
-                pid_path,
-                state_path,
+                device_flag=device_flag,
             )
     elif args.command == "set":
         auto_set_location(
@@ -1056,6 +1051,5 @@ if __name__ == "__main__":
             pmd3_bin,
             args.connection,
             log_path,
-            pid_path,
-            state_path,
+            device_flag=device_flag,
         )
