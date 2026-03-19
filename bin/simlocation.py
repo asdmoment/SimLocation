@@ -12,10 +12,13 @@ import signal
 import shutil
 import socket
 import time
+import threading
+import webbrowser
 from contextlib import suppress
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import Optional
 from pymobiledevice3.remote.remote_service_discovery import (
     RemoteServiceDiscoveryService,
 )
@@ -648,47 +651,101 @@ def clear_location(
     sys.exit(1)
 
 
-def exit_coordinate_resolution_error(message) -> NoReturn:
-    print(message, file=sys.stderr)
-    sys.exit(1)
+AMAP_KEY_GUIDE = """\
+[!] 未设置高德地图 Key。
+
+  使用地图选点功能需要一个免费的高德 JS API Key：
+
+  1. 前往 https://console.amap.com/ 注册/登录
+  2. 进入「应用管理」→「我的应用」→「创建新应用」
+  3. 为应用添加一个 Key，服务平台选择「Web端(JS API)」
+  4. 复制 Key，在终端中设置环境变量：
+
+     export SIMLOCATION_AMAP_KEY=你的Key
+
+  设置完成后重新运行 simlocation map。
+"""
+
+MAP_HTML_PATH = PROJECT_DIR / "web" / "map.html"
+MAP_SERVER_TIMEOUT_SECONDS = 300
 
 
-def resolve_target_coordinates(args) -> tuple[str, str]:
-    if args.lat is not None and args.lon is not None:
-        return args.lat, args.lon
+class _MapRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/":
+            self.send_error(404)
+            return
+        html = self.server.map_html
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(html)))
+        self.end_headers()
+        self.wfile.write(html)
 
-    env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
-    env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
-    if env_lat is not None and env_lon is not None:
-        assert env_lat is not None and env_lon is not None
-        return env_lat, env_lon
+    def do_POST(self):
+        if self.path != "/confirm":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        try:
+            data = json.loads(body)
+            lat = float(data["lat"])
+            lon = float(data["lon"])
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            self.send_error(400)
+            return
+        self.server.picked_coords = (lat, lon)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        resp = b'{"ok":true}'
+        self.send_header("Content-Length", str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
 
-    if args.lat is not None or args.lon is not None:
-        exit_coordinate_resolution_error(
-            "CLI 坐标不完整，且环境变量 SIMLOCATION_DEFAULT_LAT 和 SIMLOCATION_DEFAULT_LON 也未同时设置。"
-        )
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
-    if env_lat is not None or env_lon is not None:
-        exit_coordinate_resolution_error(
-            "环境变量 SIMLOCATION_DEFAULT_LAT 和 SIMLOCATION_DEFAULT_LON 必须同时设置。"
-        )
+    def log_message(self, format, *args):
+        pass
 
-    exit_coordinate_resolution_error(
-        "未提供坐标。请传入 lat lon，或设置环境变量 SIMLOCATION_DEFAULT_LAT 和 SIMLOCATION_DEFAULT_LON。"
-    )
+
+def run_map_picker(amap_key):
+    if not MAP_HTML_PATH.is_file():
+        print(f"[!] 地图页面文件不存在: {MAP_HTML_PATH}")
+        sys.exit(1)
+    template = MAP_HTML_PATH.read_text(encoding="utf-8")
+
+    server = HTTPServer(("127.0.0.1", 0), _MapRequestHandler)
+    port = server.server_address[1]
+    html_text = template.replace("{{AMAP_KEY}}", amap_key).replace("{{PORT}}", str(port))
+    server.map_html = html_text.encode("utf-8")
+    server.picked_coords = None
+
+    url = f"http://127.0.0.1:{port}/"
+    print(f"[*] 地图选点服务已启动: {url}")
+    print("[*] 正在打开浏览器，请在地图上选择位置后点击「确认」。")
+    webbrowser.open(url)
+
+    timer = threading.Timer(MAP_SERVER_TIMEOUT_SECONDS, server.shutdown)
+    timer.daemon = True
+    timer.start()
+
+    server.serve_forever()
+    timer.cancel()
+    return server.picked_coords
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         prog="simlocation",
         description="通过 pymobiledevice3 自动设置 iPhone 虚拟定位。",
-    )
-    parser.add_argument("lat", nargs="?", help="纬度")
-    parser.add_argument("lon", nargs="?", help="经度")
-    parser.add_argument(
-        "--clear",
-        action="store_true",
-        help="清除虚拟定位，恢复真实位置",
     )
     parser.add_argument(
         "--debug",
@@ -713,20 +770,85 @@ def parse_args():
     parser.add_argument(
         "--state-file", default=str(DEFAULT_STATE_PATH), help=argparse.SUPPRESS
     )
-    return parser.parse_args()
+    # Backward compat: --clear flag (legacy)
+    parser.add_argument(
+        "--clear",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    # simlocation set <lat> <lon>
+    sub_set = subparsers.add_parser("set", help="设置虚拟定位")
+    sub_set.add_argument("lat", help="纬度")
+    sub_set.add_argument("lon", help="经度")
+
+    # simlocation clear
+    subparsers.add_parser("clear", help="清除虚拟定位，恢复真实位置")
+
+    # simlocation map [--pick-only]
+    sub_map = subparsers.add_parser("map", help="打开地图选点，选择后自动设置定位")
+    sub_map.add_argument(
+        "--pick-only",
+        action="store_true",
+        help="仅选点并输出坐标，不自动设置定位",
+    )
+
+    args, remaining = parser.parse_known_args()
+
+    # Backward compat: simlocation <lat> <lon> (no subcommand)
+    if args.command is None and not args.clear and not getattr(args, "_hold_session", False):
+        if len(remaining) == 2:
+            args.command = "set"
+            args.lat = remaining[0]
+            args.lon = remaining[1]
+        elif len(remaining) == 0:
+            # Check env vars for default coordinates
+            env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
+            env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
+            if env_lat is not None and env_lon is not None:
+                args.command = "set"
+                args.lat = env_lat
+                args.lon = env_lon
+            else:
+                # No command, no args, no env — show help
+                parser.print_help()
+                sys.exit(0)
+        elif remaining:
+            parser.error(f"无法识别的参数: {' '.join(remaining)}")
+
+    # Backward compat: --clear flag
+    if args.clear and args.command is None:
+        args.command = "clear"
+
+    # _hold-session needs lat/lon from remaining args
+    if getattr(args, "_hold_session", False) and args.command is None:
+        if len(remaining) == 2:
+            args.command = "set"
+            args.lat = remaining[0]
+            args.lon = remaining[1]
+        else:
+            env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
+            env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
+            if env_lat is not None and env_lon is not None:
+                args.command = "set"
+                args.lat = env_lat
+                args.lon = env_lon
+            else:
+                parser.error("_hold-session 需要坐标参数。")
+
+    return args
 
 
 if __name__ == "__main__":
     args = parse_args()
-    target_lat: Optional[str] = None
-    target_lon: Optional[str] = None
-    if not args.clear:
-        target_lat, target_lon = resolve_target_coordinates(args)
 
     pmd3_bin = resolve_pymobiledevice3()
     log_path = Path(args.log_file) if args.debug else None
     pid_path = Path(args.pid_file)
     state_path = Path(args.state_file)
+
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_message("[*] 调试日志已开启。", log_path)
@@ -734,12 +856,11 @@ if __name__ == "__main__":
         log_message(f"[*] pymobiledevice3: {pmd3_bin}", log_path)
         log_message(f"[*] connection mode: {args.connection}", log_path)
         log_message(f"[*] tunneld URL: {TUNNELD_URL}", log_path)
+
     if args._hold_session:
-        if target_lat is None or target_lon is None:
-            raise ValueError("hold session requires lat and lon")
         run_hold_session(
-            target_lat,
-            target_lon,
+            args.lat,
+            args.lon,
             pmd3_bin,
             args.connection,
             pid_path,
@@ -747,14 +868,36 @@ if __name__ == "__main__":
             log_path,
         )
         sys.exit(0)
-    if args.clear:
+
+    if args.command == "clear":
         clear_location(pmd3_bin, args.connection, log_path, pid_path, state_path)
-    else:
-        if target_lat is None or target_lon is None:
-            raise ValueError("set location requires lat and lon")
+    elif args.command == "map":
+        amap_key = os.environ.get("SIMLOCATION_AMAP_KEY", "").strip()
+        if not amap_key:
+            print(AMAP_KEY_GUIDE)
+            sys.exit(1)
+        coords = run_map_picker(amap_key)
+        if coords is None:
+            print("[-] 未选择坐标（超时或关闭了浏览器）。")
+            sys.exit(1)
+        lat, lon = coords
+        print(f"[+] 已选择坐标: {lat}, {lon}")
+        if getattr(args, "pick_only", False):
+            print(f"{lat} {lon}")
+        else:
+            auto_set_location(
+                str(lat),
+                str(lon),
+                pmd3_bin,
+                args.connection,
+                log_path,
+                pid_path,
+                state_path,
+            )
+    elif args.command == "set":
         auto_set_location(
-            target_lat,
-            target_lon,
+            args.lat,
+            args.lon,
             pmd3_bin,
             args.connection,
             log_path,
