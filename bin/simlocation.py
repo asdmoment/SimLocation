@@ -891,6 +891,11 @@ def parse_args():
         default="auto",
         help="连接模式。auto 会让 tunneld 为当前设备创建新 tunnel；rsd 复用 tunneld 当前已有的 RSD。",
     )
+    parser.add_argument(
+        "--device", "-d",
+        default=None,
+        help="目标设备（别名或 UDID）",
+    )
     parser.add_argument("--_hold-session", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--pid-file", default=str(DEFAULT_PID_PATH), help=argparse.SUPPRESS
@@ -913,7 +918,8 @@ def parse_args():
     sub_set.add_argument("lon", help="经度")
 
     # simlocation clear
-    subparsers.add_parser("clear", help="清除虚拟定位，恢复真实位置")
+    sub_clear = subparsers.add_parser("clear", help="清除虚拟定位，恢复真实位置")
+    sub_clear.add_argument("--all", action="store_true", dest="clear_all", help="清除所有设备的虚拟定位")
 
     # simlocation map [--pick-only]
     sub_map = subparsers.add_parser("map", help="打开地图选点，选择后自动设置定位")
@@ -922,6 +928,25 @@ def parse_args():
         action="store_true",
         help="仅选点并输出坐标，不自动设置定位",
     )
+
+    # simlocation status
+    subparsers.add_parser("status", help="查看所有设备定位状态")
+
+    # simlocation device {list,add,remove,default}
+    sub_device = subparsers.add_parser("device", help="设备管理")
+    device_subparsers = sub_device.add_subparsers(dest="device_command")
+
+    device_subparsers.add_parser("list", help="列出所有设备")
+
+    sub_device_add = device_subparsers.add_parser("add", help="注册设备别名")
+    sub_device_add.add_argument("alias", help="设备别名")
+    sub_device_add.add_argument("udid", nargs="?", default=None, help="设备 UDID（省略则交互选择）")
+
+    sub_device_remove = device_subparsers.add_parser("remove", help="删除设备别名")
+    sub_device_remove.add_argument("alias", help="要删除的别名")
+
+    sub_device_default = device_subparsers.add_parser("default", help="设置或查看默认设备")
+    sub_device_default.add_argument("name", nargs="?", default=None, help="别名或 UDID（省略则查看当前默认）")
 
     # Try normal parse first; if it fails on subcommand matching,
     # fall back to legacy positional arg handling.
@@ -940,6 +965,7 @@ def parse_args():
         legacy_parser.add_argument("--debug", action="store_true")
         legacy_parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
         legacy_parser.add_argument("--connection", choices=("auto", "rsd"), default="auto")
+        legacy_parser.add_argument("--device", "-d", default=None)
         legacy_parser.add_argument("--_hold-session", action="store_true")
         legacy_parser.add_argument("--pid-file", default=str(DEFAULT_PID_PATH))
         legacy_parser.add_argument("--state-file", default=str(DEFAULT_STATE_PATH))
