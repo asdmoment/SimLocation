@@ -711,6 +711,26 @@ class _MapRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _open_app_window(url):
+    """Try to open URL in a minimal app-like window (no address bar).
+    Falls back to regular browser if Chrome is not available."""
+    chrome_paths = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    ]
+    for path in chrome_paths:
+        if Path(path).is_file():
+            subprocess.Popen(
+                [path, f"--app={url}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+    webbrowser.open(url)
+
+
 def run_map_picker(amap_key=None):
     if amap_key:
         html_path = MAP_AMAP_HTML_PATH
@@ -735,7 +755,7 @@ def run_map_picker(amap_key=None):
     url = f"http://127.0.0.1:{port}/"
     print(f"[*] 地图选点服务已启动 ({provider}): {url}")
     print("[*] 正在打开浏览器，请在地图上选择位置后点击「确认」。")
-    webbrowser.open(url)
+    _open_app_window(url)
 
     timer = threading.Timer(MAP_SERVER_TIMEOUT_SECONDS, server.shutdown)
     timer.daemon = True
