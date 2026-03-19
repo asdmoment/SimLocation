@@ -730,7 +730,7 @@ def run_map_picker(amap_key):
 
     url = f"http://127.0.0.1:{port}/"
     print(f"[*] 地图选点服务已启动: {url}")
-    print("[*] 正在打开浏览器，请在地图上选择位置后点击「确认」。")
+    print("[*] 正在打开浏览器，请在地图上选择位置后点击「确认选点」。")
     webbrowser.open(url)
 
     timer = threading.Timer(MAP_SERVER_TIMEOUT_SECONDS, server.shutdown)
@@ -814,7 +814,7 @@ def parse_args():
             else:
                 # No command, no args, no env — show help
                 parser.print_help()
-                sys.exit(0)
+                sys.exit(1)
         elif remaining:
             parser.error(f"无法识别的参数: {' '.join(remaining)}")
 
@@ -881,10 +881,10 @@ if __name__ == "__main__":
             print("[-] 未选择坐标（超时或关闭了浏览器）。")
             sys.exit(1)
         lat, lon = coords
-        print(f"[+] 已选择坐标: {lat}, {lon}")
         if getattr(args, "pick_only", False):
-            print(f"{lat} {lon}")
+            print(f"{lat:.6f} {lon:.6f}")
         else:
+            print(f"[+] 已选择坐标: {lat:.6f}, {lon:.6f}")
             auto_set_location(
                 str(lat),
                 str(lon),
