@@ -19,12 +19,20 @@ from typing import NoReturn, Optional
 from pymobiledevice3.remote.remote_service_discovery import (
     RemoteServiceDiscoveryService,
 )
-from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import (
-    DvtSecureSocketProxyService,
-)
 from pymobiledevice3.services.dvt.instruments.location_simulation import (
     LocationSimulation,
 )
+
+try:
+    # pymobiledevice3 >= 9.x: DvtSecureSocketProxyService 被重构为 DvtProvider
+    from pymobiledevice3.services.dvt.instruments.dvt_provider import (
+        DvtProvider as DvtSecureSocketProxyService,
+    )
+except ImportError:
+    # pymobiledevice3 < 9.x
+    from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import (
+        DvtSecureSocketProxyService,
+    )
 
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_DIR = (

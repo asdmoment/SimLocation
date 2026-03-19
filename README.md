@@ -1,6 +1,6 @@
 # SimLocation
 
-`SimLocation` 是一个本地命令行工具，用来在 macOS 上通过 `pymobiledevice3` 给已连接的 iPhone 或 iPad 设置模拟定位。
+`SimLocation` 是一个本地命令行工具，用来在 macOS 上通过 [`pymobiledevice3`](https://github.com/doronz88/pymobiledevice3) 给已连接的 iPhone 或 iPad 设置模拟定位。
 
 它更适合已经在用 `pymobiledevice3` 和 `tunneld` 的人：想快速切换到一组坐标，保持定位一段时间，或者在测试完之后手动清掉。
 
@@ -17,13 +17,35 @@
 
 如果你平时总是用同一组私人测试坐标，也可以只在本机环境里设置：`SIMLOCATION_DEFAULT_LAT` 和 `SIMLOCATION_DEFAULT_LON`。这是可选的本地默认值，不建议写进仓库。
 
+## 安装依赖
+
+本项目依赖 [`pymobiledevice3`](https://github.com/doronz88/pymobiledevice3)，一个纯 Python 实现的 iOS 设备通信库。SimLocation 通过它的 Python API 与设备建立 DVT 会话来实现定位模拟。
+
+安装方式（推荐使用虚拟环境）：
+
+```bash
+pip install pymobiledevice3 requests
+```
+
+目前兼容 `pymobiledevice3` v8.x 和 v9.x。如果你从旧版本升级后遇到 `ModuleNotFoundError`，请确认升级后的版本已正确安装在当前 Python 环境中。
+
+## 设备准备
+
+在使用之前，需要确保目标 iOS 设备已开启**开发者模式**：
+
+1. 在 iPhone 或 iPad 上进入 **设置 → 隐私与安全性 → 开发者模式**
+2. 打开开发者模式开关，按提示重启设备
+3. 重启后确认启用开发者模式
+
+> iOS 16 及以上版本需要手动开启开发者模式，否则无法建立开发者服务连接。
+
 ## 基本准备
 
 使用前默认你已经具备这些条件：
 
 - 运行环境是 `macOS`
-- 有一台可连接的 `iPhone` 或 `iPad`
-- 已安装 `pymobiledevice3`
+- 有一台已开启开发者模式的 `iPhone` 或 `iPad`
+- 已安装 `pymobiledevice3`（`pip install pymobiledevice3`）
 - `tunneld` 正常运行，设备能建立可用连接
 - `python3` 已安装 `requests` 和 `pymobiledevice3`，或者你通过 `SIMLOCATION_PYTHON` 指定了对应解释器
 
@@ -65,3 +87,13 @@ export SIMLOCATION_DEFAULT_LON=<你的经度>
 这个项目面向 `macOS` 上配合 `iPhone` 或 `iPad` 的本地定位测试。
 
 它不是多平台方案，也不打算覆盖 Windows、Linux、Android，或者更通用的设备管理流程。如果你的需求超出这类本地测试场景，可能需要自己扩展，或者换别的工具。
+
+## 致谢
+
+本项目基于 [`pymobiledevice3`](https://github.com/doronz88/pymobiledevice3) 实现设备通信和定位模拟功能。`pymobiledevice3` 由 [doronz88](https://github.com/doronz88) 开发维护，是一个纯 Python 实现的 iDevice 通信库。
+
+## 许可证
+
+本项目以 [GNU General Public License v3.0 (GPL-3.0)](LICENSE) 发布。
+
+由于本项目以库的形式使用了 `pymobiledevice3`（GPL-3.0-or-later），根据 GPL 的传染性条款，本项目同样采用 GPL-3.0 许可。详见 [LICENSE](LICENSE) 文件。
