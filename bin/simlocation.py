@@ -516,6 +516,7 @@ def start_hold_session(
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
+        "set",
         str(lat),
         str(lon),
         "--connection",
@@ -819,16 +820,39 @@ def parse_args():
         help="仅选点并输出坐标，不自动设置定位",
     )
 
-    args, remaining = parser.parse_known_args()
+    # Try normal parse first; if it fails on subcommand matching,
+    # fall back to legacy positional arg handling.
+    try:
+        _stderr = sys.stderr
+        sys.stderr = open(os.devnull, "w")
+        args, remaining = parser.parse_known_args()
+        sys.stderr = _stderr
+    except SystemExit:
+        sys.stderr = _stderr
+        # argparse exits on error — intercept to handle legacy format.
+        # Re-parse without subparsers: strip argv to find bare lat/lon.
+        raw = sys.argv[1:]
+        legacy_parser = argparse.ArgumentParser(add_help=False)
+        legacy_parser.add_argument("--clear", action="store_true")
+        legacy_parser.add_argument("--debug", action="store_true")
+        legacy_parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
+        legacy_parser.add_argument("--connection", choices=("auto", "rsd"), default="auto")
+        legacy_parser.add_argument("--_hold-session", action="store_true")
+        legacy_parser.add_argument("--pid-file", default=str(DEFAULT_PID_PATH))
+        legacy_parser.add_argument("--state-file", default=str(DEFAULT_STATE_PATH))
+        largs, positional = legacy_parser.parse_known_args(raw)
+
+        args = largs
+        args.command = None
+        remaining = positional
 
     # Backward compat: simlocation <lat> <lon> (no subcommand)
-    if args.command is None and not args.clear and not getattr(args, "_hold_session", False):
-        if len(remaining) == 2:
+    if args.command is None and not getattr(args, "clear", False) and not getattr(args, "_hold_session", False):
+        if len(remaining) >= 2:
             args.command = "set"
             args.lat = remaining[0]
             args.lon = remaining[1]
         elif len(remaining) == 0:
-            # Check env vars for default coordinates
             env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
             env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
             if env_lat is not None and env_lon is not None:
@@ -836,19 +860,18 @@ def parse_args():
                 args.lat = env_lat
                 args.lon = env_lon
             else:
-                # No command, no args, no env — show help
                 parser.print_help()
                 sys.exit(1)
         elif remaining:
             parser.error(f"无法识别的参数: {' '.join(remaining)}")
 
     # Backward compat: --clear flag
-    if args.clear and args.command is None:
+    if getattr(args, "clear", False) and args.command is None:
         args.command = "clear"
 
-    # _hold-session needs lat/lon from remaining args
+    # _hold-session needs lat/lon
     if getattr(args, "_hold_session", False) and args.command is None:
-        if len(remaining) == 2:
+        if len(remaining) >= 2:
             args.command = "set"
             args.lat = remaining[0]
             args.lon = remaining[1]
