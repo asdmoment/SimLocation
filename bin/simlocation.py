@@ -133,6 +133,15 @@ def read_state(state_path):
 
 
 def is_process_alive(pid):
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return False
     try:
         os.kill(pid, 0)
         return True
@@ -172,7 +181,17 @@ def stop_hold_session(pid_path, state_path, log_path=None, quiet=False):
 
     if not quiet:
         log_message(f"[*] 正在停止后台定位会话，PID: {pid}", log_path)
-    os.kill(pid, signal.SIGTERM)
+
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_TERMINATE = 0x0001
+        handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+        if handle:
+            kernel32.TerminateProcess(handle, 1)
+            kernel32.CloseHandle(handle)
+    else:
+        os.kill(pid, signal.SIGTERM)
 
     deadline = time.time() + CMD_TIMEOUT_SECONDS
     while time.time() < deadline:
@@ -642,14 +661,19 @@ def start_hold_session(
     child_env = os.environ.copy()
     child_env["SIMLOCATION_UDID"] = udid
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-        env=child_env,
-    )
+    popen_kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "env": child_env,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+        popen_kwargs["close_fds"] = True
+    proc = subprocess.Popen(cmd, **popen_kwargs)
 
     deadline = time.time() + HOLD_START_TIMEOUT_SECONDS
     while time.time() < deadline:
@@ -817,20 +841,43 @@ class _MapRequestHandler(BaseHTTPRequestHandler):
 
 def _open_app_window(url):
     """Try to open URL in a minimal app-like window (no address bar).
-    Falls back to regular browser if Chrome is not available."""
-    chrome_paths = [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-    ]
+    Falls back to regular browser if not available."""
+    if sys.platform == "win32":
+        chrome_paths = []
+        for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(env_var, "")
+            if base:
+                chrome_paths.extend([
+                    os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"),
+                    os.path.join(base, "Microsoft", "Edge", "Application", "msedge.exe"),
+                    os.path.join(base, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                    os.path.join(base, "Chromium", "Application", "chrome.exe"),
+                ])
+    elif sys.platform == "darwin":
+        chrome_paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ]
+    else:
+        # Linux / other Unix
+        chrome_paths = []
+        for name in ("google-chrome", "google-chrome-stable", "chromium-browser",
+                      "chromium", "microsoft-edge", "brave-browser"):
+            found = shutil.which(name)
+            if found:
+                chrome_paths.append(found)
+
     for path in chrome_paths:
         if Path(path).is_file():
-            subprocess.Popen(
-                [path, f"--app={url}"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            popen_kwargs = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = subprocess.DETACHED_PROCESS
+            subprocess.Popen([path, f"--app={url}"], **popen_kwargs)
             return
     webbrowser.open(url)
 
@@ -955,8 +1002,11 @@ def parse_args():
         sys.stderr = open(os.devnull, "w")
         args, remaining = parser.parse_known_args()
         sys.stderr = _stderr
-    except SystemExit:
+    except SystemExit as e:
         sys.stderr = _stderr
+        if e.code == 0:
+            # --help or similar triggered a clean exit
+            sys.exit(0)
         # argparse exits on error — intercept to handle legacy format.
         # Re-parse without subparsers: strip argv to find bare lat/lon.
         raw = sys.argv[1:]
@@ -1130,6 +1180,7 @@ if __name__ == "__main__":
         log_message(f"[*] Python: {sys.executable}", log_path)
         log_message(f"[*] pymobiledevice3: {pmd3_bin}", log_path)
         log_message(f"[*] connection mode: {args.connection}", log_path)
+        log_message(f"[*] platform: {sys.platform}", log_path)
         log_message(f"[*] tunneld URL: {TUNNELD_URL}", log_path)
 
     if args._hold_session:
