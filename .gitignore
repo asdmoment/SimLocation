@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 var/*
 !var/.gitkeep
-!var/devices.json
+!var/devices.example.json
+.claude/settings.local.json
 docs/
