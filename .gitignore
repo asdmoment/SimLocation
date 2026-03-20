@@ -4,3 +4,4 @@ __pycache__/
 var/*
 !var/.gitkeep
 !var/devices.json
+docs/

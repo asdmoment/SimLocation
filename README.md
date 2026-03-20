@@ -289,7 +289,7 @@ simlocation device add myphone
 simlocation device default myphone
 
 # 5. 设置模拟定位（自动使用默认设备）
-simlocation set 39.9042 116.4074
+simlocation set <latitude> <longitude>
 
 # 6. 用完清除
 simlocation clear
@@ -342,7 +342,7 @@ $ export SIMLOCATION_AMAP_KEY=你的Key
 | Windows | 支持 | 需安装 iTunes 或 Apple Devices 提供 USB 驱动 |
 | Linux | 支持 | 需要 usbmuxd 服务运行 |
 
-本项目面向配合 iPhone 或 iPad 的本地定位测试，不覆盖 Android 或更通用的设备管理流程。
+本项目面向配合 iPhone 或 iPad 的本地定位测试，暂时不考虑覆盖 Android 或更通用的设备管理流程。
 
 ## 致谢
 
@@ -351,5 +351,3 @@ $ export SIMLOCATION_AMAP_KEY=你的Key
 ## 许可证
 
 本项目以 [GNU General Public License v3.0 (GPL-3.0)](LICENSE) 发布。
-
-由于本项目以库的形式使用了 `pymobiledevice3`（GPL-3.0-or-later），根据 GPL 的传染性条款，本项目同样采用 GPL-3.0 许可。详见 [LICENSE](LICENSE) 文件。
