@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.0.0
+
+- 跨平台支持：新增 Windows 和 Linux 兼容，进程管理、浏览器检测、子进程启动均已适配。
+- 新增 `bin/simlocation.cmd` Windows 批处理启动器。
+- 新增多设备管理子命令 `device`（`list`/`add`/`remove`/`default`），支持设备别名和 UDID 管理。
+- 支持 `--device`（`-d`）全局参数指定目标设备。
+- 运行时状态文件按设备 UDID 隔离（`var/<UDID>.state.json`、`var/<UDID>.pid`、`var/<UDID>.log`）。
+- 修复 `--help` 被旧版解析器吞掉不显示的问题。
+- README 更新为跨平台说明，补充开发者模式开启方法。
+
 ## v2.0.0
 
 - 新增 `simlocation map` 子命令：在浏览器中打开高德地图选点页面，点选位置后自动设置虚拟定位。

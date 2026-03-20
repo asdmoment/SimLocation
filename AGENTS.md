@@ -2,7 +2,7 @@
 
 ## Purpose
 
-- This file is for coding agents working in `this repository`.
+- This file is for coding agents working in this repository.
 - Follow the repo's actual structure and avoid inventing tooling that is not present.
 
 ## Repository Snapshot
@@ -16,7 +16,7 @@
 
 ## What This Project Does
 
-- `SimLocation` sets or clears simulated iPhone/iPad location on macOS.
+- `SimLocation` sets or clears simulated iPhone/iPad location (cross-platform: macOS, Windows, Linux).
 - It depends on `pymobiledevice3`, `requests`, a running `tunneld`, and a connected device.
 - The Python CLI maintains a background DVT session, and the shell helper handles AFC sync flows.
 
@@ -35,7 +35,7 @@
 
 ## Environment Assumptions
 
-- OS target is `macOS`.
+- Primary OS target is `macOS`; Windows and Linux are also supported.
 - Real end-to-end validation requires a connected `iPhone` or `iPad`.
 - `tunneld` must be reachable.
 - Python must have `requests` and `pymobiledevice3` installed.
