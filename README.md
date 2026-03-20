@@ -200,7 +200,7 @@ $ export SIMLOCATION_DEFAULT_LON=<你的经度>
 
 运行时文件默认放在 `var/` 下，包括：
 
-- `var/devices.json` — 设备别名和默认设备配置
+- `var/devices.json` — 设备别名和默认设备配置（首次运行自动创建，格式参见 `var/devices.example.json`）
 - `var/<UDID>.log` — 每台设备的会话日志
 - `var/<UDID>.pid` — 每台设备的后台进程 PID
 - `var/<UDID>.state.json` — 每台设备的会话状态
