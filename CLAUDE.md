@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-SimLocation is a macOS CLI tool that sets simulated GPS locations on connected iPhones/iPads via `pymobiledevice3`. It maintains a background DVT session over a `tunneld` tunnel until the user clears the location.
+SimLocation is a cross-platform CLI tool (macOS, Windows, Linux) that sets simulated GPS locations on connected iPhones/iPads via `pymobiledevice3`. It maintains a background DVT session over a `tunneld` tunnel until the user clears the location.
 
 ## Architecture
 
 Two-layer entry point:
-- **`bin/simlocation`** — POSIX shell wrapper that resolves symlinks, discovers a suitable Python interpreter (checking `SIMLOCATION_PYTHON`, then `python3` with required deps), and `exec`s into the Python CLI.
-- **`bin/simlocation.py`** — Async Python CLI with subcommands: `set`, `clear`, `map`, `status`, and `device` (`list`/`add`/`remove`/`default`). Supports a global `--device` (`-d`) flag to target a specific device by alias or UDID. On `set`, it spawns a detached background process (`--_hold-session`) that opens a DVT connection via `RemoteServiceDiscoveryService` → `DvtSecureSocketProxyService`/`DvtProvider` → `LocationSimulation`, then holds the session until SIGTERM. The foreground process polls per-device state files for "ready" status and exits.
+- **`bin/simlocation`** — POSIX shell wrapper (macOS/Linux) that resolves symlinks, discovers a suitable Python interpreter (checking `SIMLOCATION_PYTHON`, then `python3` with required deps), and `exec`s into the Python CLI.
+- **`bin/simlocation.cmd`** — Windows batch wrapper with equivalent logic (also tries `python` in addition to `python3`).
+- **`bin/simlocation.py`** — Async Python CLI with subcommands: `set`, `clear`, `map`, `status`, and `device` (`list`/`add`/`remove`/`default`). Supports a global `--device` (`-d`) flag to target a specific device by alias or UDID. On `set`, it spawns a detached background process (`--_hold-session`) that opens a DVT connection via `RemoteServiceDiscoveryService` → `DvtSecureSocketProxyService`/`DvtProvider` → `LocationSimulation`, then holds the session until SIGTERM. The foreground process polls per-device state files for "ready" status and exits. Cross-platform: uses `ctypes`/`kernel32` for process management on Windows, `os.kill` signals on Unix; browser detection covers macOS app bundles, Windows `PROGRAMFILES` paths, and Linux `$PATH` lookups.
 
 pymobiledevice3 compatibility: imports are wrapped in `try/except` to support both v8.x (`DvtSecureSocketProxyService`) and v9.x (`DvtProvider`).
 

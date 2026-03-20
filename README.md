@@ -1,6 +1,6 @@
 # SimLocation
 
-`SimLocation` 是一个本地命令行工具，用来在 macOS 上通过 [`pymobiledevice3`](https://github.com/doronz88/pymobiledevice3) 给已连接的 iPhone 或 iPad 设置模拟定位。
+`SimLocation` 是一个跨平台命令行工具，通过 [`pymobiledevice3`](https://github.com/doronz88/pymobiledevice3) 给已连接的 iPhone 或 iPad 设置模拟定位。支持 macOS、Windows 和 Linux。
 
 它更适合已经在用 `pymobiledevice3` 和 `tunneld` 的人：想快速切换到一组坐标，保持定位一段时间，或者在测试完之后手动清掉。
 
@@ -13,7 +13,7 @@
 
 ## 应用场景
 
-常见用法很直接：把设备连到 Mac，确认 `tunneld` 可用，然后用命令传入一组经纬度开始模拟定位。工具会保持会话，直到你执行清除。
+常见用法很直接：把设备连到电脑，确认 `tunneld` 可用，然后用命令传入一组经纬度开始模拟定位。工具会保持会话，直到你执行清除。
 
 如果你平时总是用同一组私人测试坐标，也可以只在本机环境里设置：`SIMLOCATION_DEFAULT_LAT` 和 `SIMLOCATION_DEFAULT_LON`。这是可选的本地默认值，不建议写进仓库。
 
@@ -31,13 +31,43 @@ pip install pymobiledevice3 requests
 
 ## 设备准备
 
-在使用之前，需要确保目标 iOS 设备已开启**开发者模式**：
+在使用之前，需要确保目标 iOS 设备已开启**开发者模式**。
 
-1. 在 iPhone 或 iPad 上进入 **设置 → 隐私与安全性 → 开发者模式**
-2. 打开开发者模式开关，按提示重启设备
-3. 重启后确认启用开发者模式
+### 开启开发者模式
+
+1. 在 iPhone 或 iPad 上进入 **设置 → 隐私与安全性**
+2. 找到 **开发者模式** 开关并打开
+3. 按提示重启设备，重启后确认启用
 
 > iOS 16 及以上版本需要手动开启开发者模式，否则无法建立开发者服务连接。
+
+### 找不到"开发者模式"选项？
+
+很多人在「隐私与安全性」里看不到"开发者模式"这个选项，这是正常的 — **iOS 默认隐藏这个开关**，需要触发一次开发者工具连接才会出现。
+
+**方法一：通过 Xcode 触发（需要 Mac）**
+
+1. 在 Mac 上安装 [Xcode](https://apps.apple.com/app/xcode/id497799835)（App Store 免费下载）
+2. 用 USB 线连接 iPhone 到 Mac
+3. 打开 Xcode → Window → Devices and Simulators
+4. 等待 Xcode 识别设备（首次可能需要几分钟下载调试支持文件）
+5. 回到 iPhone 的 **设置 → 隐私与安全性**，"开发者模式"选项应该已经出现
+
+> 不需要真的用 Xcode 写代码，只要让它识别一次设备就行。识别后可以关闭 Xcode。
+
+**方法二：通过 pymobiledevice3 命令触发（无需 Mac）**
+
+如果你没有 Mac 或不想装 Xcode，可以用 pymobiledevice3 直接启用：
+
+```bash
+# 1. 先用 USB 连接设备，确保已点击"信任此电脑"
+# 2. 执行以下命令（不需要 tunneld）
+pymobiledevice3 amfi enable-developer-mode
+```
+
+执行后手机会提示重启，重启后在弹出的确认对话框中点击"打开"即可。
+
+> 如果命令报错，请确认设备已通过 USB 连接并信任了当前电脑。Windows 需要先安装 iTunes。
 
 ## 连接设备
 
@@ -46,10 +76,14 @@ pip install pymobiledevice3 requests
 **1. 启动 tunneld**
 
 ```bash
+# macOS / Linux（需要管理员权限）
 $ sudo pymobiledevice3 remote tunneld
+
+# Windows（以管理员身份运行命令提示符或 PowerShell）
+> pymobiledevice3 remote tunneld
 ```
 
-`tunneld` 需要 `sudo` 权限，启动后会在前台运行，保持终端窗口不要关闭。
+`tunneld` 需要管理员权限，启动后会在前台运行，保持终端窗口不要关闭。
 
 **2. 用 USB 连接设备**
 
@@ -69,19 +103,66 @@ $ pymobiledevice3 usbmux list
 
 - 拔掉 USB 线重新插入
 - 在终端中重启 `tunneld`（Ctrl+C 停止后重新运行）
-- 检查设备是否已解锁并信任了当前 Mac
+- 检查设备是否已解锁并信任了当前电脑
+- Windows 用户需确认已安装 [iTunes](https://www.apple.com/itunes/) 或 Apple Devices（提供 USB 驱动）
+- Linux 用户需确认 `usbmuxd` 服务正在运行（`sudo systemctl start usbmuxd`）
+- 如果看到 `Failed to setupterm(kind='xterm-ghostty')` 警告，这是 pymobiledevice3 的依赖库不认识 Ghostty 终端，不影响功能。可通过 `export TERM=xterm-256color` 消除警告
 
 ## 基本准备
 
 使用前默认你已经具备这些条件：
 
-- 运行环境是 `macOS`
+- 运行环境是 macOS、Windows 或 Linux
 - 有一台已开启开发者模式的 `iPhone` 或 `iPad`
 - 已安装 `pymobiledevice3`（`pip install pymobiledevice3`）
 - `tunneld` 正常运行，设备已完成配对（详见上方「连接设备」）
 - `python3` 已安装 `requests` 和 `pymobiledevice3`，或者你通过 `SIMLOCATION_PYTHON` 指定了对应解释器
 
-入口脚本是 `bin/simlocation`。如果设置了 `SIMLOCATION_PYTHON`，它会优先使用这个 Python；否则会尝试直接使用当前的 `python3`。
+**入口脚本：**
+
+| 平台 | 入口 |
+|------|------|
+| macOS / Linux | `bin/simlocation` (shell wrapper) |
+| Windows | `bin\simlocation.cmd` |
+
+如果设置了 `SIMLOCATION_PYTHON`，它会优先使用这个 Python；否则会尝试使用 `python3`（Windows 上也会尝试 `python`）。
+
+## 添加到 PATH（可选）
+
+如果想在任何目录下直接运行 `simlocation` 命令，可以将 `bin/` 目录添加到系统 PATH：
+
+**macOS / Linux**
+
+```bash
+# 添加到 shell 配置文件（~/.zshrc 或 ~/.bashrc）
+export PATH="/path/to/SimLocation/bin:$PATH"
+
+# 或者创建符号链接到已有的 PATH 目录
+ln -s /path/to/SimLocation/bin/simlocation /usr/local/bin/simlocation
+```
+
+**Windows**
+
+方法一：添加到用户 PATH 环境变量
+
+1. 按 Win+R，输入 `sysdm.cpl`，回车
+2. 切换到「高级」选项卡 → 「环境变量」
+3. 在「用户变量」中找到 `Path`，点击「编辑」
+4. 添加 SimLocation 的 `bin` 目录完整路径（如 `C:\SimLocation\bin`）
+
+方法二：在 PowerShell 中快速设置（仅当前用户）
+
+```powershell
+# 永久添加到用户 PATH
+$binPath = "C:\SimLocation\bin"
+$currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($currentPath -notlike "*$binPath*") {
+    [Environment]::SetEnvironmentVariable("Path", "$currentPath;$binPath", "User")
+}
+# 重新打开终端生效
+```
+
+设置后即可在任意目录下使用 `simlocation` 命令（Windows 上会自动匹配 `simlocation.cmd`）。
 
 ## 坐标用法
 
@@ -104,8 +185,15 @@ $ simlocation clear
 如果你只想在自己电脑上保留一组常用默认值，可以设置：
 
 ```bash
+# macOS / Linux
 $ export SIMLOCATION_DEFAULT_LAT=<你的纬度>
 $ export SIMLOCATION_DEFAULT_LON=<你的经度>
+```
+
+```cmd
+:: Windows (CMD)
+> set SIMLOCATION_DEFAULT_LAT=<你的纬度>
+> set SIMLOCATION_DEFAULT_LON=<你的经度>
 ```
 
 设置后，执行 `simlocation` 时可以不再重复输入经纬度；如果没有提供命令行坐标，程序会读取这两个环境变量。
@@ -187,8 +275,9 @@ $ simlocation device remove <别名>
 **典型工作流**
 
 ```bash
-# 1. 启动 tunneld（另一个终端）
-sudo pymobiledevice3 remote tunneld
+# 1. 启动 tunneld（另一个终端，需要管理员权限）
+# macOS/Linux: sudo pymobiledevice3 remote tunneld
+# Windows: 以管理员身份运行 pymobiledevice3 remote tunneld
 
 # 2. 查看已连接设备
 simlocation device list
@@ -234,16 +323,26 @@ $ simlocation map --pick-only
 4. 复制 Key，设置环境变量：
 
 ```bash
+# macOS / Linux
 $ export SIMLOCATION_AMAP_KEY=你的Key
 ```
 
-建议将上面这行加入 `~/.zshrc` 或 `~/.bashrc` 以便长期使用。
+```cmd
+:: Windows (CMD)
+> set SIMLOCATION_AMAP_KEY=你的Key
+```
 
-## 局限性
+建议将上面的设置持久化（macOS/Linux: 写入 `~/.zshrc` 或 `~/.bashrc`；Windows: 通过系统环境变量设置）以便长期使用。
 
-这个项目面向 `macOS` 上配合 `iPhone` 或 `iPad` 的本地定位测试。
+## 平台支持
 
-它不是多平台方案，也不打算覆盖 Windows、Linux、Android，或者更通用的设备管理流程。如果你的需求超出这类本地测试场景，可能需要自己扩展，或者换别的工具。
+| 平台 | 状态 | 备注 |
+|------|------|------|
+| macOS | 完整支持 | 原生开发平台 |
+| Windows | 支持 | 需安装 iTunes 或 Apple Devices 提供 USB 驱动 |
+| Linux | 支持 | 需要 usbmuxd 服务运行 |
+
+本项目面向配合 iPhone 或 iPad 的本地定位测试，不覆盖 Android 或更通用的设备管理流程。
 
 ## 致谢
 
