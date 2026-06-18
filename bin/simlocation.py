@@ -631,6 +631,28 @@ def execute_dvt_location_action(rsd_pair, action, lat=None, lon=None, log_path=N
         return False
 
 
+async def clear_held_location(simulation, state_path):
+    state = read_state(state_path) or {}
+    state["status"] = "clearing"
+    state["clear_confirmed"] = False
+    write_state(state_path, state)
+    try:
+        await simulation.clear()
+    except Exception as exc:
+        state["status"] = "error"
+        state["clear_confirmed"] = False
+        state["clear_error"] = str(exc)
+        state["failed_at"] = datetime.now().isoformat(timespec="seconds")
+        write_state(state_path, state)
+        raise
+
+    state["status"] = "cleared"
+    state["clear_confirmed"] = True
+    state["cleared_at"] = datetime.now().isoformat(timespec="seconds")
+    state.pop("clear_error", None)
+    write_state(state_path, state)
+
+
 async def _hold_dvt_location_session(rsd_pair, lat, lon, state_path, log_path=None):
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -664,8 +686,7 @@ async def _hold_dvt_location_session(rsd_pair, lat, lon, state_path, log_path=No
                     "[+] 后台定位会话已建立，将持续保持当前位置直到执行 clear。", log_path
                 )
                 await stop_event.wait()
-                with suppress(Exception):
-                    await simulation.clear()
+                await clear_held_location(simulation, state_path)
 
 
 def run_hold_session(
@@ -699,15 +720,16 @@ def run_hold_session(
         state["stopped_at"] = datetime.now().isoformat(timespec="seconds")
         write_state(state_path, state)
     except Exception as exc:
-        write_state(
-            state_path,
+        state = read_state(state_path) or {}
+        state.update(
             {
                 "status": "error",
                 "pid": os.getpid(),
                 "error": str(exc),
                 "failed_at": datetime.now().isoformat(timespec="seconds"),
-            },
+            }
         )
+        write_state(state_path, state)
         log_message(f"[-] 后台定位会话启动失败: {exc}", log_path)
         raise
     finally:
@@ -784,7 +806,14 @@ def clear_location(
         udid = resolve_device_udid(pmd3_bin, log_path, device_flag=device_flag)
     pid_path = pid_path_for(udid)
     state_path = state_path_for(udid)
-    stop_hold_session(pid_path, state_path, log_path, quiet=False)
+    stopped_session = stop_hold_session(
+        pid_path, state_path, log_path, quiet=False
+    )
+    state = read_state(state_path)
+    if stopped_session and state and state.get("clear_confirmed"):
+        log_message("[+] 已通过后台定位会话清除虚拟定位。", log_path)
+        return
+
     for attempt in range(1, COMMAND_RETRIES + 1):
         rsd_pair = acquire_rsd(udid, connection_mode, log_path)
         if not rsd_pair:
