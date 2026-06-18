@@ -207,6 +207,14 @@ $ export SIMLOCATION_DEFAULT_LON=<你的经度>
 
 如果你想改位置，可以设置 `SIMLOCATION_VAR_DIR`。
 
+在手机热点或 Wi-Fi tunnel 建立较慢的环境中，后台 DVT 会话可能需要数十秒才能就绪。SimLocation 默认等待 60 秒；如需调整，可以设置：
+
+```bash
+export SIMLOCATION_START_TIMEOUT_SECONDS=90
+```
+
+该值必须是大于 0 的秒数。真正超时后，SimLocation 会终止未就绪的后台进程，避免命令报错后又迟到地修改定位。
+
 ## 多设备管理
 
 连接多台设备时，可以用别名来管理和指定目标设备。
