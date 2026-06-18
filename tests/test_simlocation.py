@@ -1,4 +1,7 @@
 import importlib.util
+import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -78,6 +81,67 @@ class TunnelSelectionTests(unittest.TestCase):
 
         requested_urls = [call.args[0] for call in get.call_args_list]
         self.assertNotIn(f"{simlocation.TUNNELD_URL}/cancel", requested_urls)
+
+
+class HoldSessionTests(unittest.TestCase):
+    def test_default_start_timeout_is_sixty_seconds(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(simlocation.get_hold_start_timeout_seconds(), 60.0)
+
+    def test_invalid_start_timeout_is_rejected(self):
+        with patch.dict(
+            os.environ,
+            {"SIMLOCATION_START_TIMEOUT_SECONDS": "not-a-number"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "SIMLOCATION_START_TIMEOUT_SECONDS"):
+                simlocation.get_hold_start_timeout_seconds()
+
+    def test_session_can_become_ready_after_old_twelve_second_limit(self):
+        proc = Mock(pid=123)
+        proc.poll.return_value = None
+        with (
+            patch.object(
+                simlocation,
+                "read_state",
+                side_effect=(
+                    {"status": "starting", "pid": 123},
+                    {"status": "ready", "pid": 123},
+                ),
+            ),
+            patch.object(simlocation.time, "monotonic", side_effect=(0, 13, 13)),
+            patch.object(simlocation.time, "sleep"),
+        ):
+            self.assertTrue(
+                simlocation.wait_for_hold_session(
+                    proc,
+                    Path("unused-state.json"),
+                    timeout_seconds=60,
+                )
+            )
+
+    def test_true_timeout_terminates_child_and_records_error(self):
+        proc = Mock(pid=456)
+        proc.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            with (
+                patch.object(simlocation.time, "monotonic", side_effect=(0, 61)),
+                patch.object(simlocation, "terminate_child_process") as terminate,
+            ):
+                self.assertFalse(
+                    simlocation.wait_for_hold_session(
+                        proc,
+                        state_path,
+                        timeout_seconds=60,
+                    )
+                )
+
+            terminate.assert_called_once_with(proc)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "error")
+            self.assertEqual(state["pid"], 456)
+            self.assertIn("60", state["error"])
 
 
 if __name__ == "__main__":

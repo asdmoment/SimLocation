@@ -59,7 +59,7 @@ RSD_CONNECT_TIMEOUT_SECONDS = 2
 DEFAULT_LOG_PATH = RUNTIME_DIR / "simlocation.log"
 DEFAULT_PID_PATH = RUNTIME_DIR / "simlocation.pid"
 DEFAULT_STATE_PATH = RUNTIME_DIR / "simlocation.state.json"
-HOLD_START_TIMEOUT_SECONDS = 12
+HOLD_START_TIMEOUT_SECONDS = 60
 HOLD_POLL_INTERVAL_SECONDS = 0.25
 
 DEFAULT_DEVICES_PATH = RUNTIME_DIR / "devices.json"
@@ -163,6 +163,79 @@ def remove_file_if_exists(path):
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def get_hold_start_timeout_seconds():
+    raw_value = os.environ.get("SIMLOCATION_START_TIMEOUT_SECONDS")
+    if raw_value is None:
+        return float(HOLD_START_TIMEOUT_SECONDS)
+    try:
+        timeout_seconds = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            "SIMLOCATION_START_TIMEOUT_SECONDS 必须是大于 0 的数字。"
+        ) from exc
+    if timeout_seconds <= 0:
+        raise ValueError("SIMLOCATION_START_TIMEOUT_SECONDS 必须是大于 0 的数字。")
+    return timeout_seconds
+
+
+def terminate_child_process(proc):
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=CMD_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=CMD_TIMEOUT_SECONDS)
+
+
+def wait_for_hold_session(
+    proc, state_path, timeout_seconds, log_path=None
+):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        state = read_state(state_path)
+        if state and state.get("pid") == proc.pid:
+            status = state.get("status")
+            if status == "ready":
+                return True
+            if status == "error":
+                log_message(
+                    f"[!] 后台定位会话启动失败: {state.get('error', 'unknown error')}",
+                    log_path,
+                )
+                return False
+        if proc.poll() is not None:
+            state = read_state(state_path)
+            if state and state.get("status") == "error":
+                log_message(
+                    f"[!] 后台定位会话启动失败: {state.get('error', 'unknown error')}",
+                    log_path,
+                )
+            else:
+                log_message(
+                    f"[!] 后台定位进程意外退出，退出码: {proc.returncode}",
+                    log_path,
+                )
+            return False
+        time.sleep(HOLD_POLL_INTERVAL_SECONDS)
+
+    message = f"后台定位会话在 {timeout_seconds:g} 秒内未进入 ready 状态。"
+    log_message(f"[!] {message}", log_path)
+    terminate_child_process(proc)
+    state = read_state(state_path) or {}
+    state.update(
+        {
+            "status": "error",
+            "pid": proc.pid,
+            "error": message,
+            "failed_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    write_state(state_path, state)
+    return False
 
 
 def stop_hold_session(pid_path, state_path, log_path=None, quiet=False):
@@ -644,6 +717,12 @@ def run_hold_session(
 def start_hold_session(
     lat, lon, pmd3_bin, connection_mode, udid, log_path=None
 ):
+    try:
+        timeout_seconds = get_hold_start_timeout_seconds()
+    except ValueError as exc:
+        log_message(f"[!] {exc}", log_path)
+        return False
+
     pid_path = pid_path_for(udid)
     state_path = state_path_for(udid)
     stop_hold_session(pid_path, state_path, log_path, quiet=True)
@@ -678,39 +757,7 @@ def start_hold_session(
         popen_kwargs["start_new_session"] = True
         popen_kwargs["close_fds"] = True
     proc = subprocess.Popen(cmd, **popen_kwargs)
-
-    deadline = time.time() + HOLD_START_TIMEOUT_SECONDS
-    while time.time() < deadline:
-        state = read_state(state_path)
-        if state and state.get("pid") == proc.pid:
-            status = state.get("status")
-            if status == "ready":
-                return True
-            if status == "error":
-                log_message(
-                    f"[!] 后台定位会话启动失败: {state.get('error', 'unknown error')}",
-                    log_path,
-                )
-                return False
-        if proc.poll() is not None:
-            state = read_state(state_path)
-            if state and state.get("status") == "error":
-                log_message(
-                    f"[!] 后台定位会话启动失败: {state.get('error', 'unknown error')}",
-                    log_path,
-                )
-            else:
-                log_message(
-                    f"[!] 后台定位进程意外退出，退出码: {proc.returncode}", log_path
-                )
-            return False
-        time.sleep(HOLD_POLL_INTERVAL_SECONDS)
-
-    log_message(
-        f"[!] 后台定位会话在 {HOLD_START_TIMEOUT_SECONDS} 秒内未进入 ready 状态。",
-        log_path,
-    )
-    return False
+    return wait_for_hold_session(proc, state_path, timeout_seconds, log_path)
 
 
 def auto_set_location(
