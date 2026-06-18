@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,34 @@ MODULE_PATH = ROOT_DIR / "bin" / "simlocation.py"
 SPEC = importlib.util.spec_from_file_location("simlocation_under_test", MODULE_PATH)
 simlocation = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(simlocation)
+
+
+class LauncherTests(unittest.TestCase):
+    def test_selected_python_uses_sibling_pymobiledevice3_cli(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bin_dir = Path(temp_dir)
+            python_bin = bin_dir / "python"
+            pmd3_bin = bin_dir / "pymobiledevice3"
+            python_bin.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"${SIMLOCATION_PMD3:-}\"\n",
+                encoding="utf-8",
+            )
+            pmd3_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python_bin.chmod(0o755)
+            pmd3_bin.chmod(0o755)
+            env = os.environ.copy()
+            env["SIMLOCATION_PYTHON"] = str(python_bin)
+            env.pop("SIMLOCATION_PMD3", None)
+
+            result = subprocess.run(
+                [str(ROOT_DIR / "bin" / "simlocation"), "--help"],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.stdout.strip(), str(pmd3_bin))
 
 
 class SimLocationSmokeTests(unittest.TestCase):
