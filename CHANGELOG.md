@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.0.1
+
+- 热点/Wi-Fi 场景优先复用可达 RSD，不再无条件取消并重建 tunnel。
+- 后台定位启动等待默认延长到 60 秒，并支持 `SIMLOCATION_START_TIMEOUT_SECONDS` 覆盖；真正超时会清理孤儿进程。
+- 清除定位由现有 DVT 保持会话写入确认状态，避免实际已清除却因二次 `/start-tunnel` 失败而报错。
+- 新增只读 `simlocation doctor`，检查 Python、pymobiledevice3、tunneld、目标设备、RSD 和后台会话。
+- 新增标准库 `unittest` 回归测试，覆盖 tunnel 选择、慢启动、clear 确认和 doctor。
+- 验证兼容 `pymobiledevice3` 9.12.0 与 9.27.0；推荐运行版本更新为 9.27.0。
+
 ## v3.0.0
 
 - 跨平台支持：新增 Windows 和 Linux 兼容，进程管理、浏览器检测、子进程启动均已适配。
