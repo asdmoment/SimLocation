@@ -17,6 +17,7 @@ import webbrowser
 from contextlib import suppress
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Optional
 from pymobiledevice3.remote.remote_service_discovery import (
@@ -1045,6 +1046,9 @@ def parse_args():
     # simlocation status
     subparsers.add_parser("status", help="查看所有设备定位状态")
 
+    # simlocation doctor
+    subparsers.add_parser("doctor", help="只读检查运行环境、tunneld 和设备连接")
+
     # simlocation device {list,add,remove,default}
     sub_device = subparsers.add_parser("device", help="设备管理")
     device_subparsers = sub_device.add_subparsers(dest="device_command")
@@ -1065,11 +1069,14 @@ def parse_args():
     # fall back to legacy positional arg handling.
     try:
         _stderr = sys.stderr
-        sys.stderr = open(os.devnull, "w")
+        _null_stderr = open(os.devnull, "w")
+        sys.stderr = _null_stderr
         args, remaining = parser.parse_known_args()
         sys.stderr = _stderr
+        _null_stderr.close()
     except SystemExit as e:
         sys.stderr = _stderr
+        _null_stderr.close()
         if e.code == 0:
             # --help or similar triggered a clean exit
             sys.exit(0)
@@ -1216,6 +1223,143 @@ def cmd_status(pmd3_bin, log_path=None):
     cmd_device_list(pmd3_bin, log_path)
 
 
+def doctor_check(label, status, detail):
+    return {"label": label, "status": status, "detail": detail}
+
+
+def collect_doctor_checks(pmd3_bin):
+    checks = [
+        doctor_check(
+            "Python",
+            "ok",
+            f"{sys.executable} ({sys.version.split()[0]})",
+        )
+    ]
+
+    try:
+        module_version = importlib_metadata.version("pymobiledevice3")
+        checks.append(
+            doctor_check("pymobiledevice3 模块", "ok", module_version)
+        )
+    except importlib_metadata.PackageNotFoundError:
+        checks.append(
+            doctor_check("pymobiledevice3 模块", "error", "当前 Python 未安装")
+        )
+
+    try:
+        result = subprocess.run(
+            [pmd3_bin, "version"],
+            capture_output=True,
+            text=True,
+            timeout=CMD_TIMEOUT_SECONDS,
+        )
+        cli_version = result.stdout.strip()
+        if result.returncode == 0 and cli_version:
+            checks.append(
+                doctor_check(
+                    "pymobiledevice3 CLI",
+                    "ok",
+                    f"{pmd3_bin} ({cli_version})",
+                )
+            )
+        else:
+            detail = result.stderr.strip() or f"退出码 {result.returncode}"
+            checks.append(doctor_check("pymobiledevice3 CLI", "error", detail))
+    except Exception as exc:
+        checks.append(doctor_check("pymobiledevice3 CLI", "error", str(exc)))
+
+    try:
+        snapshot = get_tunneld_snapshot()
+    except Exception as exc:
+        checks.append(doctor_check("tunneld", "error", str(exc)))
+        return checks
+
+    if not isinstance(snapshot, dict):
+        checks.append(doctor_check("tunneld", "error", "返回内容不是设备字典"))
+        return checks
+    checks.append(
+        doctor_check(
+            "tunneld",
+            "ok",
+            f"{TUNNELD_URL}，发现 {len(snapshot)} 台设备",
+        )
+    )
+
+    devices_data = read_devices()
+    default = devices_data.get("default")
+    if default:
+        udid = resolve_alias(default, devices_data)
+        target_status = "ok"
+        target_detail = f"{default} ({udid})" if default != udid else udid
+    elif len(snapshot) == 1:
+        udid = next(iter(snapshot))
+        target_status = "warn"
+        target_detail = f"未设置默认设备，将自动使用 {udid}"
+    else:
+        checks.append(
+            doctor_check("目标设备", "error", "未设置默认设备且无法唯一选择")
+        )
+        return checks
+    checks.append(doctor_check("目标设备", target_status, target_detail))
+
+    if udid not in snapshot:
+        checks.append(
+            doctor_check("RSD", "error", "tunneld 当前未发现目标设备")
+        )
+        return checks
+
+    rsd_pair = extract_rsd_pair(snapshot[udid])
+    if not rsd_pair:
+        checks.append(doctor_check("RSD", "error", "未找到地址和端口"))
+        return checks
+    if is_rsd_reachable(rsd_pair[0], rsd_pair[1]):
+        checks.append(
+            doctor_check("RSD", "ok", f"{rsd_pair[0]}:{rsd_pair[1]} 可达")
+        )
+    else:
+        checks.append(
+            doctor_check("RSD", "error", f"{rsd_pair[0]}:{rsd_pair[1]} 不可达")
+        )
+
+    state = read_state(state_path_for(udid))
+    if not state:
+        checks.append(doctor_check("后台会话", "ok", "当前没有状态记录"))
+    elif state.get("status") == "ready":
+        pid = state.get("pid")
+        if isinstance(pid, int) and is_process_alive(pid):
+            checks.append(doctor_check("后台会话", "ok", f"ready，PID {pid}"))
+        else:
+            checks.append(
+                doctor_check("后台会话", "warn", "状态为 ready，但 PID 已失效")
+            )
+    elif state.get("status") == "error":
+        checks.append(
+            doctor_check(
+                "后台会话",
+                "warn",
+                state.get("error", "上一次会话失败"),
+            )
+        )
+    else:
+        checks.append(
+            doctor_check("后台会话", "ok", f"状态: {state.get('status', 'unknown')}")
+        )
+
+    return checks
+
+
+def doctor_exit_code(checks):
+    return 1 if any(check["status"] == "error" for check in checks) else 0
+
+
+def cmd_doctor(pmd3_bin):
+    checks = collect_doctor_checks(pmd3_bin)
+    markers = {"ok": "[+]", "warn": "[!]", "error": "[-]"}
+    for check in checks:
+        print(f"{markers[check['status']]} {check['label']}: {check['detail']}")
+    return doctor_exit_code(checks)
+
+
 def cmd_clear_all(pmd3_bin, connection_mode="auto", log_path=None):
     state_files = sorted(RUNTIME_DIR.glob("*.state.json"))
     active = []
@@ -1267,6 +1411,10 @@ if __name__ == "__main__":
 
     if args.command == "status":
         cmd_status(pmd3_bin, log_path)
+    elif args.command == "doctor":
+        doctor_result = cmd_doctor(pmd3_bin)
+        if doctor_result:
+            sys.exit(doctor_result)
     elif args.command == "device":
         dc = getattr(args, "device_command", None)
         if dc == "list":

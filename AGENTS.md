@@ -52,6 +52,7 @@
 
 - Local default coordinates: `SIMLOCATION_DEFAULT_LAT`, `SIMLOCATION_DEFAULT_LON`
 - Runtime and launcher overrides: `SIMLOCATION_PYTHON`, `SIMLOCATION_VAR_DIR`
+- Background startup timeout: `SIMLOCATION_START_TIMEOUT_SECONDS`
 - Device and binary overrides: `SIMLOCATION_PMD3`, `SIMLOCATION_UDID`
 
 ## Dependency Checks
@@ -65,6 +66,7 @@
 - Shell syntax check: `bash -n bin/simlocation`
 - Shell helper syntax check: `bash -n tools/pm3-afc-sync.sh`
 - CLI smoke check with deps installed: `python3 bin/simlocation.py --help`
+- Read-only environment diagnostic: `bin/simlocation doctor`
 - Helper smoke check: `bash tools/pm3-afc-sync.sh --help`
 
 ## Single-Test Guidance

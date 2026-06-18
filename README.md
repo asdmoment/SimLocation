@@ -266,6 +266,14 @@ $ simlocation status
 
 显示所有设备的定位模拟状态。
 
+**只读诊断**
+
+```bash
+$ simlocation doctor
+```
+
+检查当前 Python、`pymobiledevice3` 模块和 CLI、tunneld、默认设备、RSD 可达性以及后台会话状态。`doctor` 不会启动或取消 tunnel，也不会设置或清除设备定位；`[-]` 表示会阻止 SimLocation 工作的问题，`[!]` 表示建议处理但不一定阻断的警告。
+
 **批量清除**
 
 ```bash
