@@ -34,4 +34,11 @@ else
   exit 1
 fi
 
+if [ -z "${SIMLOCATION_PMD3:-}" ]; then
+  PYTHON_DIR=$(CDPATH= cd -- "$(dirname -- "$PYTHON_BIN")" && pwd)
+  if [ -x "$PYTHON_DIR/pymobiledevice3" ]; then
+    export SIMLOCATION_PMD3="$PYTHON_DIR/pymobiledevice3"
+  fi
+fi
+
 exec "$PYTHON_BIN" "$PYTHON_IMPL" "$@"
