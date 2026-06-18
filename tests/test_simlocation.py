@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -225,6 +226,110 @@ class ClearLocationTests(unittest.TestCase):
             "clear",
             log_path=None,
         )
+
+
+class DoctorTests(unittest.TestCase):
+    def test_parser_accepts_doctor_subcommand(self):
+        with patch.object(sys, "argv", ["simlocation", "doctor"]):
+            args = simlocation.parse_args()
+        self.assertEqual(args.command, "doctor")
+
+    def test_healthy_environment_has_no_errors_or_side_effects(self):
+        snapshot = {
+            "udid": [
+                {
+                    "tunnel-address": "fd00::1",
+                    "tunnel-port": 1234,
+                    "interface": "172.20.10.1",
+                }
+            ]
+        }
+        version_result = Mock(returncode=0, stdout="9.27.0\n", stderr="")
+        with (
+            patch.object(
+                simlocation.importlib_metadata,
+                "version",
+                return_value="9.27.0",
+            ),
+            patch.object(simlocation.subprocess, "run", return_value=version_result),
+            patch.object(simlocation, "get_tunneld_snapshot", return_value=snapshot),
+            patch.object(
+                simlocation,
+                "read_devices",
+                return_value={"default": "phone", "aliases": {"phone": "udid"}},
+            ),
+            patch.object(simlocation, "is_rsd_reachable", return_value=True),
+            patch.object(
+                simlocation,
+                "read_state",
+                return_value={"status": "ready", "pid": 123},
+            ),
+            patch.object(simlocation, "is_process_alive", return_value=True),
+            patch.object(simlocation, "request_fresh_rsd") as fresh,
+            patch.object(simlocation, "stop_hold_session") as stop,
+            patch.object(simlocation, "execute_dvt_location_action") as dvt,
+        ):
+            checks = simlocation.collect_doctor_checks("pmd3")
+
+        self.assertFalse([check for check in checks if check["status"] == "error"])
+        self.assertEqual(simlocation.doctor_exit_code(checks), 0)
+        fresh.assert_not_called()
+        stop.assert_not_called()
+        dvt.assert_not_called()
+
+    def test_unreachable_tunneld_is_an_error(self):
+        version_result = Mock(returncode=0, stdout="9.27.0\n", stderr="")
+        with (
+            patch.object(
+                simlocation.importlib_metadata,
+                "version",
+                return_value="9.27.0",
+            ),
+            patch.object(simlocation.subprocess, "run", return_value=version_result),
+            patch.object(
+                simlocation,
+                "get_tunneld_snapshot",
+                side_effect=RuntimeError("connection refused"),
+            ),
+        ):
+            checks = simlocation.collect_doctor_checks("pmd3")
+
+        tunneld_check = next(check for check in checks if check["label"] == "tunneld")
+        self.assertEqual(tunneld_check["status"], "error")
+        self.assertEqual(simlocation.doctor_exit_code(checks), 1)
+
+    def test_stale_ready_pid_is_a_warning(self):
+        snapshot = {
+            "udid": [
+                {"tunnel-address": "fd00::1", "tunnel-port": 1234}
+            ]
+        }
+        version_result = Mock(returncode=0, stdout="9.27.0\n", stderr="")
+        with (
+            patch.object(
+                simlocation.importlib_metadata,
+                "version",
+                return_value="9.27.0",
+            ),
+            patch.object(simlocation.subprocess, "run", return_value=version_result),
+            patch.object(simlocation, "get_tunneld_snapshot", return_value=snapshot),
+            patch.object(
+                simlocation,
+                "read_devices",
+                return_value={"default": "udid", "aliases": {}},
+            ),
+            patch.object(simlocation, "is_rsd_reachable", return_value=True),
+            patch.object(
+                simlocation,
+                "read_state",
+                return_value={"status": "ready", "pid": 123},
+            ),
+            patch.object(simlocation, "is_process_alive", return_value=False),
+        ):
+            checks = simlocation.collect_doctor_checks("pmd3")
+
+        session_check = next(check for check in checks if check["label"] == "后台会话")
+        self.assertEqual(session_check["status"], "warn")
 
 
 if __name__ == "__main__":
