@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -142,6 +142,89 @@ class HoldSessionTests(unittest.TestCase):
             self.assertEqual(state["status"], "error")
             self.assertEqual(state["pid"], 456)
             self.assertIn("60", state["error"])
+
+
+class HeldSessionClearTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_clear_records_confirmation(self):
+        simulation = Mock()
+        simulation.clear = AsyncMock()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            simlocation.write_state(
+                state_path,
+                {"status": "ready", "pid": 123, "lat": "1", "lon": "2"},
+            )
+
+            await simlocation.clear_held_location(simulation, state_path)
+
+            state = simlocation.read_state(state_path)
+            self.assertEqual(state["status"], "cleared")
+            self.assertTrue(state["clear_confirmed"])
+            self.assertIn("cleared_at", state)
+            simulation.clear.assert_awaited_once()
+
+    async def test_failed_clear_records_error_and_raises(self):
+        simulation = Mock()
+        simulation.clear = AsyncMock(side_effect=RuntimeError("clear failed"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            simlocation.write_state(state_path, {"status": "ready", "pid": 123})
+
+            with self.assertRaisesRegex(RuntimeError, "clear failed"):
+                await simlocation.clear_held_location(simulation, state_path)
+
+            state = simlocation.read_state(state_path)
+            self.assertEqual(state["status"], "error")
+            self.assertFalse(state["clear_confirmed"])
+            self.assertEqual(state["clear_error"], "clear failed")
+
+
+class ClearLocationTests(unittest.TestCase):
+    def test_confirmed_background_clear_does_not_acquire_new_tunnel(self):
+        with (
+            patch.object(simlocation, "resolve_device_udid", return_value="udid"),
+            patch.object(simlocation, "stop_hold_session", return_value=True),
+            patch.object(
+                simlocation,
+                "read_state",
+                return_value={"status": "stopped", "clear_confirmed": True},
+            ),
+            patch.object(simlocation, "acquire_rsd") as acquire,
+            patch.object(simlocation, "execute_dvt_location_action") as execute,
+        ):
+            simlocation.clear_location("pmd3")
+
+        acquire.assert_not_called()
+        execute.assert_not_called()
+
+    def test_unconfirmed_background_clear_uses_compensating_dvt_clear(self):
+        with (
+            patch.object(simlocation, "resolve_device_udid", return_value="udid"),
+            patch.object(simlocation, "stop_hold_session", return_value=True),
+            patch.object(
+                simlocation,
+                "read_state",
+                return_value={"status": "stopped", "clear_confirmed": False},
+            ),
+            patch.object(
+                simlocation,
+                "acquire_rsd",
+                return_value=("fd00::1", "1234"),
+            ) as acquire,
+            patch.object(
+                simlocation,
+                "execute_dvt_location_action",
+                return_value=True,
+            ) as execute,
+        ):
+            simlocation.clear_location("pmd3")
+
+        acquire.assert_called_once_with("udid", "auto", None)
+        execute.assert_called_once_with(
+            ("fd00::1", "1234"),
+            "clear",
+            log_path=None,
+        )
 
 
 if __name__ == "__main__":
