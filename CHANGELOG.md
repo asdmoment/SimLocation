@@ -8,6 +8,7 @@
 - 新增只读 `simlocation doctor`，检查 Python、pymobiledevice3、tunneld、目标设备、RSD 和后台会话。
 - 新增标准库 `unittest` 回归测试，覆盖 tunnel 选择、慢启动、clear 确认和 doctor。
 - 验证兼容 `pymobiledevice3` 9.12.0 与 9.27.0；推荐运行版本更新为 9.27.0。
+- 启动器会优先使用所选 Python 环境内的 `pymobiledevice3` CLI，避免模块与命令行版本错配。
 
 ## v3.0.0
 
