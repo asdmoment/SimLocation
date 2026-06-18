@@ -30,8 +30,8 @@
 
 - There is no `pyproject.toml`, `package.json`, `Makefile`, `pytest.ini`, or `tox.ini`.
 - There is no repo-defined lint command.
-- There is no committed automated test suite.
-- Treat this as a script-first repository with manual verification.
+- The committed automated tests use the standard-library `unittest` runner.
+- Treat this as a script-first repository with narrow automated and manual verification.
 
 ## Environment Assumptions
 
@@ -60,6 +60,7 @@
 
 ## Verification Commands
 
+- Unit tests: `python3 -m unittest discover -s tests -v`
 - Python syntax check: `python3 -m py_compile bin/simlocation.py`
 - Shell syntax check: `bash -n bin/simlocation`
 - Shell helper syntax check: `bash -n tools/pm3-afc-sync.sh`
@@ -68,14 +69,13 @@
 
 ## Single-Test Guidance
 
-- There is no committed unit-test suite right now.
-- There is therefore no true repo-native "single test" command to run.
-- For targeted verification, run the narrowest file-level check that matches your edit.
+- Run one unittest class: `python3 -m unittest tests.test_simlocation.SimLocationSmokeTests -v`
+- Run one unittest method: `python3 -m unittest tests.test_simlocation.SimLocationSmokeTests.test_module_exposes_core_cli_boundaries -v`
+- For other targeted verification, run the narrowest file-level check that matches your edit.
 - Python-only edits: `python3 -m py_compile bin/simlocation.py`
 - Launcher-only edits: `bash -n bin/simlocation`
 - Helper-script edits: `bash -n tools/pm3-afc-sync.sh`
 - Non-destructive helper check: `bash tools/pm3-afc-sync.sh --dry-run --tunnel --push-local <local-path> --push-remote <remote-path>`
-- If you add pytest later, prefer `python3 -m pytest path/to/test_file.py::test_name -q` and document it here.
 
 ## Build Guidance
 
