@@ -437,15 +437,6 @@ def resolve_device_udid(pmd3_bin, log_path=None, device_flag=None):
 def request_fresh_rsd(udid, log_path=None):
     last_error = None
     for attempt in range(1, RSD_FETCH_RETRIES + 1):
-        try:
-            requests.get(
-                f"{TUNNELD_URL}/cancel",
-                params={"udid": udid},
-                timeout=TUNNELD_REQUEST_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            pass
-
         for connection_type in ("usbmux", "usb", "wifi", None):
             params = {"udid": udid}
             if connection_type:
@@ -482,6 +473,24 @@ def request_fresh_rsd(udid, log_path=None):
 
     if last_error:
         log_message(last_error, log_path)
+    return None
+
+
+def acquire_rsd(udid, connection_mode="auto", log_path=None):
+    rsd_pair = get_latest_rsd(log_path, udid)
+    if rsd_pair and is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
+        log_message(
+            f"[*] 复用 tunneld 中已有的 RSD: {rsd_pair[0]} {rsd_pair[1]}",
+            log_path,
+        )
+        return rsd_pair
+
+    if connection_mode == "rsd":
+        return None
+
+    rsd_pair = request_fresh_rsd(udid, log_path)
+    if rsd_pair and is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
+        return rsd_pair
     return None
 
 
@@ -605,14 +614,9 @@ def run_hold_session(
 
     try:
         udid = resolve_device_udid(pmd3_bin, log_path)
-        if connection_mode == "auto":
-            rsd_pair = request_fresh_rsd(udid, log_path)
-        else:
-            rsd_pair = get_latest_rsd(log_path, udid)
+        rsd_pair = acquire_rsd(udid, connection_mode, log_path)
         if not rsd_pair:
             raise RuntimeError("未找到有效的 RSD 隧道")
-        if not is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
-            raise RuntimeError(f"RSD 端口不可达: {rsd_pair[0]}:{rsd_pair[1]}")
 
         asyncio.run(
             _hold_dvt_location_session(rsd_pair, lat, lon, state_path, log_path)
@@ -735,26 +739,12 @@ def clear_location(
     state_path = state_path_for(udid)
     stop_hold_session(pid_path, state_path, log_path, quiet=False)
     for attempt in range(1, COMMAND_RETRIES + 1):
-        if connection_mode == "auto":
-            rsd_pair = request_fresh_rsd(udid, log_path)
-        else:
-            rsd_pair = get_latest_rsd(log_path, udid)
+        rsd_pair = acquire_rsd(udid, connection_mode, log_path)
         if not rsd_pair:
             log_message("未找到有效的 RSD 隧道，无法清除定位。", log_path)
             sys.exit(1)
 
         rsd_address, rsd_port = rsd_pair
-        if not is_rsd_reachable(rsd_address, rsd_port, log_path):
-            if attempt < COMMAND_RETRIES:
-                log_message(
-                    f"[!] 当前 RSD 不可达，{RETRY_DELAY_SECONDS} 秒后重新获取。",
-                    log_path,
-                )
-                time.sleep(RETRY_DELAY_SECONDS)
-                continue
-            log_message("[-] 多次获取到的 RSD 都不可达，退出。", log_path)
-            sys.exit(1)
-
         cmd = build_location_command(
             pmd3_bin,
             "clear",
