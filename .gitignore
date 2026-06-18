@@ -6,3 +6,4 @@ var/*
 !var/devices.example.json
 .claude/settings.local.json
 docs/
+.worktrees/
