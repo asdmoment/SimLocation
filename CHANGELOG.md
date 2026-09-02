@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.2.0
+
+- 失效 tunnel 现在可以自动恢复，不再需要手动重启 tunneld：当目标设备在 tunneld 中登记的 tunnel 全部探测不通时，`auto` 模式会先请求 `/cancel` 取消它们，再重新建立。此前 tunneld 收到 `/start-tunnel` 只检查该 UDID 下有没有登记的 tunnel，不检查它是否还能用，所以会一直返回同一个坏地址。
+- 重建 tunnel 改为按 usbmux（10 秒上限）、Wi-Fi（45 秒上限）顺序显式指定 `connection_type`，逐个尝试。此前不指定传输方式的单次请求会在 tunnel 已失效时把整个 45 秒耗在 bonjour 扫描里；显式请求 usbmux 时，USB 设备约 0.3 秒即可拿到新 tunnel。超时的请求仍然不会重发，改为回查 tunneld 快照。
+- `doctor` 中「现有 RSD 全部不可达」由 error 降为 warn，并说明 `set`/`clear` 会自动取消并重建，退出码不再因此为 1。
+- `device list` / `status` 的表格按终端显示宽度对齐，中文和日文别名不再挤掉后面的列。
+- 删除 3.0 之前遗留的单设备默认路径 `var/simlocation.pid`、`var/simlocation.state.json`；`clear --all` 会跳过不是以 UDID 命名的状态文件。
+- 测试从 60 个增加到 71 个；已在真机（iPhone 15 Pro，pymobiledevice3 9.27.0）验证 `doctor`、`set`、`status`、`clear` 以及失效 tunnel 的取消重建路径。
+
 ## v3.1.0
 
 - 修复 `set --device <别名> <纬度> <经度>`、`clear --device <别名>` 等写法中 `--device` 被忽略的问题：共享选项现在写在子命令前后都生效，之前子命令会把 `--device`、`--debug`、`--connection` 重置为默认值，导致操作落到默认设备上。
