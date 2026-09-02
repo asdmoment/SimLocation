@@ -54,8 +54,13 @@ TUNNELD_REQUEST_TIMEOUT_SECONDS = 5
 # tunneld's /start-tunnel blocks until the tunnel is up (or fails); over Wi-Fi /
 # hotspot that regularly takes tens of seconds. Keep this below the default
 # HOLD_START_TIMEOUT_SECONDS so the foreground waiter outlives the request.
-TUNNEL_START_TIMEOUT_SECONDS = 45
-TUNNEL_START_RETRIES = 2
+# tunneld tries every transport itself, but a plain /start-tunnel request on a
+# device whose tunnel is dead burns its whole timeout inside a bonjour scan.
+# Explicit connection_type requests bypass that: usbmux either answers in
+# fractions of a second or fails instantly. Caps must sum to less than
+# HOLD_START_TIMEOUT_SECONDS so the foreground waiter still outlives both tries.
+TUNNEL_USBMUX_TIMEOUT_SECONDS = 10
+TUNNEL_WIFI_TIMEOUT_SECONDS = 45
 CMD_TIMEOUT_SECONDS = 8
 RSD_FETCH_RETRIES = 3
 COMMAND_RETRIES = 3
@@ -596,79 +601,109 @@ def resolve_device_udid(pmd3_bin, log_path=None, device_flag=None):
     sys.exit(1)
 
 
+# Tried in order; each attempt creates at most one tunnel task inside tunneld.
+_REQUEST_CONNECTION_ORDER = (
+    ("usbmux", TUNNEL_USBMUX_TIMEOUT_SECONDS),
+    ("wifi", TUNNEL_WIFI_TIMEOUT_SECONDS),
+)
+
+
 def request_fresh_rsd(udid, log_path=None):
     """Ask tunneld to create (or hand back) a tunnel for udid.
 
-    tunneld's /start-tunnel already tries usbmux, USB and Wi-Fi itself and only
-    answers once the tunnel is up, so a single long-timeout request is issued.
-    Re-sending the request after a client-side timeout would start a second,
-    racing tunnel task inside tunneld, so on timeout the snapshot is consulted
-    instead of retrying.
+    tunneld's /start-tunnel with an explicit connection_type tries exactly one
+    transport, so usbmux is attempted first (it answers in fractions of a second
+    for a USB device and fails instantly otherwise) and Wi-Fi second. The plain
+    multi-transport request is deliberately not used: on a dead tunnel it burns
+    its whole timeout inside a bonjour scan. A timed-out attempt is never
+    re-requested; the tunnel task keeps running inside tunneld, so the snapshot
+    is consulted instead - a later attempt would find it registered.
     """
-    last_error = None
-    for attempt in range(1, TUNNEL_START_RETRIES + 1):
+    for connection_type, timeout_seconds in _REQUEST_CONNECTION_ORDER:
         log_message(
-            f"[*] 正在请求 tunneld 为设备 {udid} 建立 tunnel（最多等待 {TUNNEL_START_TIMEOUT_SECONDS} 秒）...",
+            f"[*] 正在请求 tunneld 为设备 {udid} 建立 tunnel（{connection_type}，最多等待 {timeout_seconds} 秒）...",
             log_path,
         )
         try:
             response = requests.get(
                 f"{TUNNELD_URL}/start-tunnel",
-                params={"udid": udid},
-                timeout=TUNNEL_START_TIMEOUT_SECONDS,
+                params={"udid": udid, "connection_type": connection_type},
+                timeout=timeout_seconds,
             )
             response.raise_for_status()
             data = response.json()
         except requests.Timeout:
             log_message(
-                f"[!] 等待 tunneld 建立 tunnel 超过 {TUNNEL_START_TIMEOUT_SECONDS} 秒，改为检查 tunneld 是否已在后台完成。",
+                f"[!] 等待 tunneld 建立 {connection_type} tunnel 超过 {timeout_seconds} 秒，改为检查 tunneld 是否已在后台完成。",
                 log_path,
             )
             candidates = snapshot_rsd_candidates(udid, log_path, retries=1) or []
             if candidates:
                 return candidates[0]
             log_message(
-                f"[!] tunneld 未能在 {TUNNEL_START_TIMEOUT_SECONDS} 秒内为设备 {udid} 建立 tunnel，请确认设备已解锁并连接。",
+                f"[!] 设备 {udid} 的 {connection_type} tunnel 未能在 {timeout_seconds} 秒内建立，尝试下一种传输方式。",
                 log_path,
             )
-            return None
+            continue
         except requests.HTTPError as exc:
             body = ""
             if exc.response is not None:
                 body = f" {exc.response.status_code}: {(exc.response.text or '').strip()[:200]}"
-            last_error = f"tunneld /start-tunnel 返回错误{body}"
+            log_message(f"[!] tunneld /start-tunnel ({connection_type}) 返回错误{body}", log_path)
+            continue
         except requests.RequestException as exc:
-            last_error = f"请求新 tunnel 失败: {exc}"
+            log_message(f"[!] 请求 {connection_type} tunnel 失败: {exc}", log_path)
+            continue
         except ValueError as exc:
-            last_error = f"tunneld /start-tunnel 返回了无法解析的内容: {exc}"
+            log_message(f"[!] tunneld /start-tunnel 返回了无法解析的内容: {exc}", log_path)
+            continue
         else:
             address = data.get("address") if isinstance(data, dict) else None
             port = data.get("port") if isinstance(data, dict) else None
             if address and port:
                 log_message(
-                    f"[*] tunneld 已为设备 {udid} 提供 tunnel: {address} {port}",
+                    f"[*] tunneld 已为设备 {udid} 提供 tunnel: {address} {port}（{connection_type}）",
                     log_path,
                 )
                 return str(address), str(port)
-            last_error = f"tunneld /start-tunnel 返回异常: {data}"
+            log_message(f"[!] tunneld /start-tunnel ({connection_type}) 返回异常: {data}", log_path)
 
-        if attempt < TUNNEL_START_RETRIES:
-            log_message(
-                f"[!] 建立 tunnel 失败，{RETRY_DELAY_SECONDS} 秒后重试 ({attempt}/{TUNNEL_START_RETRIES})。",
-                log_path,
-            )
-            time.sleep(RETRY_DELAY_SECONDS)
-
-    if last_error:
-        log_message(f"[!] {last_error}", log_path)
+    failures = "、".join(name for name, _ in _REQUEST_CONNECTION_ORDER)
+    log_message(
+        f"[!] tunneld 未能通过 {failures} 为设备 {udid} 建立 tunnel，请确认设备已解锁并连接。",
+        log_path,
+    )
     return None
+
+
+def cancel_tunnel(udid, log_path=None):
+    """Ask tunneld to drop the tunnels it has registered for udid.
+
+    tunneld's /start-tunnel hands back whatever tunnel is registered for the
+    UDID without checking that it still works, so a dead-but-registered tunnel
+    can only be replaced after /cancel removes it. Only call this after every
+    registered tunnel of the device failed the reachability probe.
+    """
+    try:
+        response = requests.get(
+            f"{TUNNELD_URL}/cancel",
+            params={"udid": udid},
+            timeout=TUNNELD_REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        log_message(f"[!] 请求 tunneld 取消失效 tunnel 失败: {exc}", log_path)
+        return False
+    log_message(f"[*] 已请求 tunneld 取消设备 {udid} 的失效 tunnel。", log_path)
+    return True
 
 
 def acquire_rsd(udid, connection_mode="auto", log_path=None):
     """Pick a reachable RSD for udid: reuse tunneld's existing tunnels first.
 
-    In "rsd" mode only existing tunnels are considered. In "auto" mode a new
-    tunnel is requested when none of the existing ones is reachable.
+    In "rsd" mode only existing tunnels are considered. In "auto" mode, when
+    none of the existing tunnels is reachable they are cancelled (tunneld would
+    otherwise keep handing them back) and a new tunnel is requested.
     """
     candidates = snapshot_rsd_candidates(udid, log_path)
     if candidates is None:
@@ -690,14 +725,15 @@ def acquire_rsd(udid, connection_mode="auto", log_path=None):
         return None
 
     if candidates:
-        log_message("[!] tunneld 中现有的 RSD 均不可达，尝试请求新 tunnel。", log_path)
+        log_message("[!] tunneld 中现有的 RSD 均不可达，先请求 tunneld 取消它们，再重建 tunnel。", log_path)
+        cancel_tunnel(udid, log_path)
     rsd_pair = request_fresh_rsd(udid, log_path)
     if not rsd_pair:
         return None
     if is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
         return rsd_pair
     log_message(
-        f"[!] tunneld 返回的 RSD {rsd_pair[0]} {rsd_pair[1]} 不可达。若该 tunnel 已失效，请重启 tunneld 或重新插拔设备。",
+        f"[!] tunneld 新建的 RSD {rsd_pair[0]} {rsd_pair[1]} 仍不可达，请确认设备已解锁并连接；反复失败时重启 tunneld。",
         log_path,
     )
     return None
@@ -1557,7 +1593,11 @@ def collect_doctor_checks(pmd3_bin, device_flag=None):
         checks.append(doctor_check("RSD", "ok", detail))
     else:
         checks.append(
-            doctor_check("RSD", "error", f"全部不可达: {', '.join(unreachable)}")
+            doctor_check(
+                "RSD",
+                "warn",
+                f"全部不可达: {', '.join(unreachable)}；set/clear 会先让 tunneld 取消它们再重建",
+            )
         )
 
     state = read_state(state_path_for(udid))
