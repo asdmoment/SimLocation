@@ -8,11 +8,12 @@
 ## Repository Snapshot
 
 - Main Python CLI: `bin/simlocation.py`
-- POSIX shell launcher: `bin/simlocation`
+- POSIX shell launcher: `bin/simlocation`; Windows launcher: `bin/simlocation.cmd`
+- Map picker pages: `web/map-osm.html`, `web/map-amap.html`
 - AFC helper script: `tools/pm3-afc-sync.sh`
-- Root helper symlink: `pm3-afc-sync.sh -> tools/pm3-afc-sync.sh`
-- User docs: `README.md`
-- Runtime artifacts: `var/simlocation.log`, `var/simlocation.pid`, `var/simlocation.state.json`
+- Unit tests: `tests/test_simlocation.py`
+- User docs: `README.md`; release notes: `CHANGELOG.md`; version string: `VERSION`
+- Runtime artifacts (gitignored): `var/devices.json`, `var/<UDID>.pid`, `var/<UDID>.state.json`, and `var/simlocation.log` when `--debug` is used
 
 ## What This Project Does
 
@@ -42,9 +43,10 @@
 
 ## High-Value Commands
 
-- Run the main CLI through the launcher: `bin/simlocation <lat> <lon>`
-- Clear simulated location: `bin/simlocation --clear`
-- Launcher help check when deps are installed: `bin/simlocation --help`
+- Set a simulated location: `bin/simlocation set <lat> <lon>` (legacy `bin/simlocation <lat> <lon>` still works)
+- Clear simulated location: `bin/simlocation clear` (legacy `bin/simlocation --clear` still works)
+- Target a device: add `--device <alias|UDID>` before or after the subcommand
+- Launcher help check when deps are installed: `bin/simlocation --help`; version: `bin/simlocation --version`
 - CLI help check when Python deps are installed: `python3 bin/simlocation.py --help`
 - AFC helper help: `bash tools/pm3-afc-sync.sh --help`
 
@@ -54,6 +56,8 @@
 - Runtime and launcher overrides: `SIMLOCATION_PYTHON`, `SIMLOCATION_VAR_DIR`
 - Background startup timeout: `SIMLOCATION_START_TIMEOUT_SECONDS`
 - Device and binary overrides: `SIMLOCATION_PMD3`, `SIMLOCATION_UDID`
+- tunneld base URL: `SIMLOCATION_TUNNELD_URL`
+- Map picker provider key: `SIMLOCATION_AMAP_KEY`
 
 ## Dependency Checks
 
@@ -61,7 +65,7 @@
 
 ## Verification Commands
 
-- Unit tests: `python3 -m unittest discover -s tests -v`
+- Unit tests: `python3 -m unittest discover -s tests -v` (the interpreter must import `requests` and `pymobiledevice3`; run with the same Python you point `SIMLOCATION_PYTHON` at)
 - Python syntax check: `python3 -m py_compile bin/simlocation.py`
 - Shell syntax check: `bash -n bin/simlocation`
 - Shell helper syntax check: `bash -n tools/pm3-afc-sync.sh`
@@ -131,7 +135,9 @@
 
 - Keep retries bounded with named constants.
 - Log retry attempts with enough context to diagnose device or tunnel issues.
-- Be careful when changing `TUNNELD_URL`; it is a user-environment assumption.
+- Be careful when changing `TUNNELD_URL`; it is a user-environment assumption (overridable via `SIMLOCATION_TUNNELD_URL`).
+- Never call tunneld `/cancel`, and never send `/start-tunnel` more than once per attempt: tunneld already tries every transport itself and overlapping requests race inside it.
+- Only use RSD tunnels registered under the target UDID; do not fall back to another device's tunnel.
 
 ## User-Facing Text
 
