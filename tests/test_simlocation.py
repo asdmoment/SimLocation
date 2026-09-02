@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import http.client
 import importlib.util
 import io
 import json
@@ -7,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -541,6 +543,152 @@ class ClearLocationTests(unittest.TestCase):
         )
 
 
+class SessionStateTests(unittest.TestCase):
+    def test_ready_state_with_live_pid_is_ready(self):
+        with patch.object(simlocation, "is_process_alive", return_value=True):
+            self.assertEqual(
+                simlocation.describe_session_state(
+                    {"status": "ready", "pid": 123, "lat": "1", "lon": "2"}
+                ),
+                "ready (1, 2)",
+            )
+
+    def test_ready_state_with_dead_pid_is_reported_stale(self):
+        with patch.object(simlocation, "is_process_alive", return_value=False):
+            self.assertIn(
+                "stale",
+                simlocation.describe_session_state(
+                    {"status": "ready", "pid": 123, "lat": "1", "lon": "2"}
+                ),
+            )
+
+    def test_other_states(self):
+        self.assertEqual(simlocation.describe_session_state(None), "—")
+        self.assertEqual(simlocation.describe_session_state({"status": "starting"}), "starting")
+        self.assertEqual(simlocation.describe_session_state({"status": "error"}), "error")
+        self.assertEqual(simlocation.describe_session_state({"status": "stopped"}), "—")
+
+
+@unittest.skipIf(sys.platform == "win32", "POSIX signal semantics")
+class ProcessLivenessTests(unittest.TestCase):
+    def test_permission_denied_means_process_exists(self):
+        with patch.object(simlocation.os, "kill", side_effect=PermissionError):
+            self.assertTrue(simlocation.is_process_alive(123))
+
+    def test_missing_process_is_dead(self):
+        with patch.object(simlocation.os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(simlocation.is_process_alive(123))
+
+    def test_invalid_pid_is_dead_without_signalling(self):
+        with patch.object(simlocation.os, "kill") as kill:
+            self.assertFalse(simlocation.is_process_alive(None))
+            self.assertFalse(simlocation.is_process_alive(0))
+            self.assertFalse(simlocation.is_process_alive("123"))
+        kill.assert_not_called()
+
+
+class PymobiledeviceResolutionTests(unittest.TestCase):
+    def test_interpreter_sibling_wins_over_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sibling = Path(temp_dir) / "pymobiledevice3"
+            sibling.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            sibling.chmod(0o755)
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(
+                    simlocation,
+                    "sibling_pymobiledevice3_candidates",
+                    return_value=[sibling],
+                ),
+                patch.object(simlocation.shutil, "which", return_value="/usr/bin/pymobiledevice3"),
+            ):
+                self.assertEqual(simlocation.resolve_pymobiledevice3(), str(sibling))
+
+    def test_path_is_used_when_no_sibling_exists(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(
+                simlocation,
+                "sibling_pymobiledevice3_candidates",
+                return_value=[Path("/nonexistent/pymobiledevice3")],
+            ),
+            patch.object(simlocation.shutil, "which", return_value="/usr/bin/pymobiledevice3"),
+        ):
+            self.assertEqual(simlocation.resolve_pymobiledevice3(), "/usr/bin/pymobiledevice3")
+
+    def test_optional_resolution_returns_none_instead_of_exiting(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(simlocation, "sibling_pymobiledevice3_candidates", return_value=[]),
+            patch.object(simlocation.shutil, "which", return_value=None),
+        ):
+            self.assertIsNone(simlocation.resolve_pymobiledevice3(required=False))
+            with self.assertRaises(SystemExit):
+                simlocation.resolve_pymobiledevice3()
+
+
+class MapServerTests(unittest.TestCase):
+    def setUp(self):
+        self.server = simlocation.HTTPServer(("127.0.0.1", 0), simlocation._MapRequestHandler)
+        self.server.map_html = b"<html>map</html>"
+        self.server.picked_coords = None
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.port = self.server.server_address[1]
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+
+    def request(self, method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request(method, path, body=body, headers=headers or {})
+            response = conn.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            conn.close()
+
+    def test_get_serves_map_without_cors_headers(self):
+        status, headers, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"<html>map</html>")
+        self.assertNotIn("Access-Control-Allow-Origin", headers)
+
+    def test_invalid_json_and_bad_coordinates_are_rejected(self):
+        status, _, _ = self.request(
+            "POST", "/confirm", body=b"not json", headers={"Content-Type": "application/json"}
+        )
+        self.assertEqual(status, 400)
+        status, _, _ = self.request(
+            "POST", "/confirm", body=b'{"lat": 95, "lon": 10}',
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 400)
+        status, _, _ = self.request("POST", "/confirm", body=b"", headers={"Content-Length": "0"})
+        self.assertEqual(status, 400)
+        self.assertIsNone(self.server.picked_coords)
+
+    def test_oversized_body_is_rejected(self):
+        body = b"{" + b" " * (simlocation.MAP_MAX_BODY_BYTES + 10) + b"}"
+        status, _, _ = self.request(
+            "POST", "/confirm", body=body, headers={"Content-Type": "application/json"}
+        )
+        self.assertEqual(status, 413)
+
+    def test_valid_confirm_records_coordinates_and_stops_server(self):
+        status, _, body = self.request(
+            "POST", "/confirm", body=b'{"lat": "34.2", "lon": "117.1"}',
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+        self.assertEqual(self.server.picked_coords, (34.2, 117.1))
+        self.thread.join(timeout=5)
+        self.assertFalse(self.thread.is_alive())
+
+
 class DoctorTests(unittest.TestCase):
     def test_parser_accepts_doctor_subcommand(self):
         with patch.object(sys, "argv", ["simlocation", "doctor"]):
@@ -643,6 +791,91 @@ class DoctorTests(unittest.TestCase):
 
         session_check = next(check for check in checks if check["label"] == "后台会话")
         self.assertEqual(session_check["status"], "warn")
+
+    def test_missing_cli_is_reported_but_diagnosis_continues(self):
+        with (
+            patch.object(
+                simlocation.importlib_metadata,
+                "version",
+                return_value="9.27.0",
+            ),
+            patch.object(simlocation.subprocess, "run") as run,
+            patch.object(
+                simlocation,
+                "get_tunneld_snapshot",
+                side_effect=RuntimeError("connection refused"),
+            ),
+        ):
+            checks = simlocation.collect_doctor_checks(None)
+
+        run.assert_not_called()
+        labels = [check["label"] for check in checks]
+        self.assertIn("pymobiledevice3 CLI", labels)
+        self.assertIn("tunneld", labels)
+        cli_check = next(check for check in checks if check["label"] == "pymobiledevice3 CLI")
+        self.assertEqual(cli_check["status"], "error")
+
+    def test_device_flag_selects_target_and_all_rsds_are_probed(self):
+        snapshot = {
+            "udid": [
+                {"tunnel-address": "fd00::1", "tunnel-port": 1234},
+                {"tunnel-address": "fd00::2", "tunnel-port": 5678},
+            ],
+            "other": [{"tunnel-address": "fd00::9", "tunnel-port": 9}],
+        }
+        version_result = Mock(returncode=0, stdout="9.27.0\n", stderr="")
+        with (
+            patch.object(
+                simlocation.importlib_metadata,
+                "version",
+                return_value="9.27.0",
+            ),
+            patch.object(simlocation.subprocess, "run", return_value=version_result),
+            patch.object(simlocation, "get_tunneld_snapshot", return_value=snapshot),
+            patch.object(
+                simlocation,
+                "read_devices",
+                return_value={"default": "other", "aliases": {"phone": "udid"}},
+            ),
+            patch.object(
+                simlocation,
+                "is_rsd_reachable",
+                side_effect=(False, True),
+            ) as reachable,
+            patch.object(simlocation, "read_state", return_value=None),
+        ):
+            checks = simlocation.collect_doctor_checks("pmd3", device_flag="phone")
+
+        target_check = next(check for check in checks if check["label"] == "目标设备")
+        self.assertIn("udid", target_check["detail"])
+        self.assertIn("--device", target_check["detail"])
+        rsd_check = next(check for check in checks if check["label"] == "RSD")
+        self.assertEqual(rsd_check["status"], "ok")
+        self.assertIn("fd00::2:5678", rsd_check["detail"])
+        self.assertIn("不可达: fd00::1:1234", rsd_check["detail"])
+        self.assertEqual(reachable.call_count, 2)
+
+    def test_unknown_device_flag_is_an_error(self):
+        version_result = Mock(returncode=0, stdout="9.27.0\n", stderr="")
+        with (
+            patch.object(
+                simlocation.importlib_metadata,
+                "version",
+                return_value="9.27.0",
+            ),
+            patch.object(simlocation.subprocess, "run", return_value=version_result),
+            patch.object(simlocation, "get_tunneld_snapshot", return_value={"udid": []}),
+            patch.object(
+                simlocation,
+                "read_devices",
+                return_value={"default": None, "aliases": {}},
+            ),
+        ):
+            checks = simlocation.collect_doctor_checks("pmd3", device_flag="typo")
+
+        target_check = next(check for check in checks if check["label"] == "目标设备")
+        self.assertEqual(target_check["status"], "error")
+        self.assertEqual(simlocation.doctor_exit_code(checks), 1)
 
 
 if __name__ == "__main__":
