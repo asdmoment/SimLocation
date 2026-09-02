@@ -9,11 +9,11 @@
 - `auto` 模式会逐个探测 tunneld 中该设备的所有 tunnel，任一可达即复用。
 - 后台保持会话若在建立连接期间就收到停止请求，不再设置定位。
 - `status`/`device list` 对进程已退出的 `ready` 会话显示 `stale`。
-- `doctor` 在缺少 `pymobiledevice3` CLI 时继续完成其余检查；支持 `--device` 与 `SIMLOCATION_UDID`；列出每个 RSD 的可达性。
+- `doctor` 在缺少 `pymobiledevice3` CLI 时继续完成其余检查；支持 `--device` 与 `SIMLOCATION_UDID`；列出每个 RSD 的可达性，探测过程不再在报告前额外输出。
 - `pymobiledevice3` CLI 查找顺序改为：`SIMLOCATION_PMD3`、当前 Python 环境旁的 CLI（含 Windows `Scripts\`）、PATH。
 - 地图选点服务移除通配 CORS 响应头，页面改为相对路径提交，限制请求体大小并校验坐标。
 - 新增 `--version`，新增 `SIMLOCATION_TUNNELD_URL` 环境变量。
-- 测试从 18 个增加到 58 个；README、AGENTS.md、CLAUDE.md 修正了过时的日志路径、命令形式和测试说明。
+- 测试从 18 个增加到 60 个；README、AGENTS.md、CLAUDE.md 修正了过时的日志路径、命令形式和测试说明。
 
 ## v3.0.1
 

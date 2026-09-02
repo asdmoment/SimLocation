@@ -703,11 +703,17 @@ def acquire_rsd(udid, connection_mode="auto", log_path=None):
     return None
 
 
-def is_rsd_reachable(host, port, log_path=None):
+def is_rsd_reachable(host, port, log_path=None, quiet=False):
+    """TCP-probe an RSD endpoint. With quiet=True nothing is printed (doctor builds its own report)."""
+
+    def note(message):
+        if not quiet:
+            log_message(message, log_path)
+
     try:
         addrinfos = socket.getaddrinfo(host, int(port), type=socket.SOCK_STREAM)
     except Exception as exc:
-        log_message(f"[!] 解析 RSD 地址失败: {host}:{port} ({exc})", log_path)
+        note(f"[!] 解析 RSD 地址失败: {host}:{port} ({exc})")
         return False
 
     last_error = None
@@ -717,7 +723,7 @@ def is_rsd_reachable(host, port, log_path=None):
             sock = socket.socket(family, socktype, proto)
             sock.settimeout(RSD_CONNECT_TIMEOUT_SECONDS)
             sock.connect(sockaddr)
-            log_message(f"[*] RSD 端口可达: {host}:{port}", log_path)
+            note(f"[*] RSD 端口可达: {host}:{port}")
             return True
         except Exception as exc:
             last_error = exc
@@ -725,7 +731,7 @@ def is_rsd_reachable(host, port, log_path=None):
             if sock is not None:
                 sock.close()
 
-    log_message(f"[!] RSD 端口不可达: {host}:{port} ({last_error})", log_path)
+    note(f"[!] RSD 端口不可达: {host}:{port} ({last_error})")
     return False
 
 
@@ -1542,7 +1548,8 @@ def collect_doctor_checks(pmd3_bin, device_flag=None):
     unreachable = []
     for address, port in rsd_pairs:
         target = f"{address}:{port}"
-        (reachable if is_rsd_reachable(address, port) else unreachable).append(target)
+        probe_ok = is_rsd_reachable(address, port, quiet=True)
+        (reachable if probe_ok else unreachable).append(target)
     if reachable:
         detail = f"可达: {', '.join(reachable)}"
         if unreachable:

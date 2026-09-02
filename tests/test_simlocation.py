@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -687,6 +688,31 @@ class MapServerTests(unittest.TestCase):
         self.assertEqual(self.server.picked_coords, (34.2, 117.1))
         self.thread.join(timeout=5)
         self.assertFalse(self.thread.is_alive())
+
+
+class RsdReachabilityTests(unittest.TestCase):
+    def _listening_port(self):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        return listener.getsockname()[1]
+
+    def test_quiet_probe_prints_nothing(self):
+        port = self._listening_port()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = simlocation.is_rsd_reachable("127.0.0.1", port, quiet=True)
+        self.assertTrue(result)
+        self.assertEqual(buffer.getvalue(), "")
+
+    def test_default_probe_reports_reachable_endpoint(self):
+        port = self._listening_port()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = simlocation.is_rsd_reachable("127.0.0.1", port)
+        self.assertTrue(result)
+        self.assertIn("RSD 端口可达", buffer.getvalue())
 
 
 class DoctorTests(unittest.TestCase):
