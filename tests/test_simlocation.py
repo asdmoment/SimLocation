@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -14,6 +16,30 @@ MODULE_PATH = ROOT_DIR / "bin" / "simlocation.py"
 SPEC = importlib.util.spec_from_file_location("simlocation_under_test", MODULE_PATH)
 simlocation = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(simlocation)
+
+# The CLI prints operator messages through log_message(); keep test output readable.
+_QUIET_STDOUT = contextlib.redirect_stdout(io.StringIO())
+
+
+def setUpModule():
+    _QUIET_STDOUT.__enter__()
+
+
+def tearDownModule():
+    _QUIET_STDOUT.__exit__(None, None, None)
+
+
+def parse_cli(*argv):
+    with contextlib.redirect_stderr(io.StringIO()):
+        return simlocation.parse_args(list(argv))
+
+
+def parse_cli_error(*argv):
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        with unittest.TestCase().assertRaises(SystemExit) as ctx:
+            simlocation.parse_args(list(argv))
+    return ctx.exception.code, stderr.getvalue()
 
 
 class LauncherTests(unittest.TestCase):
@@ -49,6 +75,131 @@ class SimLocationSmokeTests(unittest.TestCase):
         self.assertTrue(callable(simlocation.clear_location))
         self.assertTrue(callable(simlocation.start_hold_session))
         self.assertTrue(callable(simlocation.parse_args))
+
+
+class CliParsingTests(unittest.TestCase):
+    def test_device_flag_after_set_subcommand_is_honored(self):
+        args = parse_cli("set", "--device", "phone", "34.2", "117.1")
+        self.assertEqual(args.command, "set")
+        self.assertEqual(args.device, "phone")
+        self.assertEqual((args.lat, args.lon), ("34.2", "117.1"))
+
+    def test_device_flag_after_clear_subcommand_is_honored(self):
+        args = parse_cli("clear", "-d", "phone", "--all")
+        self.assertEqual(args.command, "clear")
+        self.assertEqual(args.device, "phone")
+        self.assertTrue(args.clear_all)
+
+    def test_top_level_flags_survive_subcommand_defaults(self):
+        args = parse_cli("--debug", "-d", "phone", "--connection", "rsd", "set", "1", "2")
+        self.assertTrue(args.debug)
+        self.assertEqual(args.device, "phone")
+        self.assertEqual(args.connection, "rsd")
+
+    def test_extra_positional_after_subcommand_is_rejected(self):
+        code, stderr = parse_cli_error("set", "34.2", "117.1", "junk")
+        self.assertEqual(code, 2)
+        self.assertIn("junk", stderr)
+
+    def test_non_numeric_coordinates_are_rejected(self):
+        code, stderr = parse_cli_error("set", "abc", "def")
+        self.assertEqual(code, 2)
+        self.assertIn("坐标必须是数字", stderr)
+
+    def test_out_of_range_coordinates_are_rejected(self):
+        code, stderr = parse_cli_error("set", "95", "10")
+        self.assertEqual(code, 2)
+        self.assertIn("纬度", stderr)
+        code, stderr = parse_cli_error("set", "10", "181")
+        self.assertEqual(code, 2)
+        self.assertIn("经度", stderr)
+
+    def test_legacy_positional_form_still_works(self):
+        args = parse_cli("-d", "phone", "-33.8", "151.2")
+        self.assertEqual(args.command, "set")
+        self.assertEqual(args.device, "phone")
+        self.assertEqual((args.lat, args.lon), ("-33.8", "151.2"))
+
+    def test_legacy_clear_flag_still_works(self):
+        args = parse_cli("--clear", "-d", "phone")
+        self.assertEqual(args.command, "clear")
+        self.assertEqual(args.device, "phone")
+
+    def test_hold_session_child_invocation_parses(self):
+        args = parse_cli(
+            "--connection", "rsd", "--pid-file", "/tmp/p", "--state-file", "/tmp/s",
+            "--_hold-session", "set", "34.2", "117.1",
+        )
+        self.assertTrue(args._hold_session)
+        self.assertEqual(args.command, "set")
+        self.assertEqual(args.pid_file, "/tmp/p")
+
+    def test_version_flag_exits_cleanly(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            code, _ = parse_cli_error("--version")
+        self.assertEqual(code, 0)
+
+
+class DeviceResolutionTests(unittest.TestCase):
+    def test_looks_like_udid_accepts_modern_and_legacy_shapes(self):
+        self.assertTrue(simlocation.looks_like_udid("00008130-000845CC01EA001C"))
+        self.assertTrue(simlocation.looks_like_udid("a" * 40))
+        self.assertFalse(simlocation.looks_like_udid("myphone"))
+        self.assertFalse(simlocation.looks_like_udid(""))
+        self.assertFalse(simlocation.looks_like_udid(None))
+
+    def test_unknown_alias_in_device_flag_fails_fast(self):
+        with patch.object(
+            simlocation,
+            "read_devices",
+            return_value={"default": None, "aliases": {"phone": "00008130-000845CC01EA001C"}},
+        ):
+            with self.assertRaises(SystemExit):
+                simlocation.resolve_device_udid("pmd3", device_flag="typo")
+            self.assertEqual(
+                simlocation.resolve_device_udid("pmd3", device_flag="phone"),
+                "00008130-000845CC01EA001C",
+            )
+            self.assertEqual(
+                simlocation.resolve_device_udid("pmd3", device_flag="00008130-000845CC01EA001C"),
+                "00008130-000845CC01EA001C",
+            )
+
+    def test_device_default_rejects_unknown_alias(self):
+        with (
+            patch.object(
+                simlocation,
+                "read_devices",
+                return_value={"default": None, "aliases": {"phone": "00008130-000845CC01EA001C"}},
+            ),
+            patch.object(simlocation, "write_devices") as write,
+        ):
+            with self.assertRaises(SystemExit):
+                simlocation.cmd_device_default("typo")
+            write.assert_not_called()
+            simlocation.cmd_device_default("phone")
+            write.assert_called_once()
+
+    def test_interactive_select_exits_on_eof(self):
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = True
+        with (
+            patch.object(simlocation.sys, "stdin", fake_stdin),
+            patch("builtins.input", side_effect=EOFError),
+        ):
+            with self.assertRaises(SystemExit):
+                simlocation.interactive_device_select(
+                    ["udid-a", "udid-b"], {"default": None, "aliases": {}}
+                )
+
+    def test_interactive_select_refuses_non_tty(self):
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = False
+        with patch.object(simlocation.sys, "stdin", fake_stdin):
+            with self.assertRaises(SystemExit):
+                simlocation.interactive_device_select(
+                    ["udid-a", "udid-b"], {"default": None, "aliases": {}}
+                )
 
 
 class TunnelSelectionTests(unittest.TestCase):
