@@ -3,7 +3,6 @@
 import requests
 import subprocess
 import sys
-import shlex
 import argparse
 import asyncio
 import json
@@ -50,8 +49,13 @@ RUNTIME_DIR = Path(
 
 # 填入你 tunneld 实际运行的 URL
 # 注意：如果 tunneld 重启后端口会变，你需要固定它的端口，或者在脚本里动态寻找
-TUNNELD_URL = "http://127.0.0.1:49151"
+TUNNELD_URL = os.environ.get("SIMLOCATION_TUNNELD_URL", "http://127.0.0.1:49151").rstrip("/")
 TUNNELD_REQUEST_TIMEOUT_SECONDS = 5
+# tunneld's /start-tunnel blocks until the tunnel is up (or fails); over Wi-Fi /
+# hotspot that regularly takes tens of seconds. Keep this below the default
+# HOLD_START_TIMEOUT_SECONDS so the foreground waiter outlives the request.
+TUNNEL_START_TIMEOUT_SECONDS = 45
+TUNNEL_START_RETRIES = 2
 CMD_TIMEOUT_SECONDS = 8
 RSD_FETCH_RETRIES = 3
 COMMAND_RETRIES = 3
@@ -335,47 +339,43 @@ def resolve_pymobiledevice3():
     sys.exit(1)
 
 
-def extract_rsd_pair(data):
-    def pick_addr_port(record):
-        if not isinstance(record, dict):
-            return None
-        rsd_address = (
-            record.get("rsd_address")
-            or record.get("tunnel-address")
-            or record.get("tunnel_address")
-        )
-        rsd_port = (
-            record.get("rsd_port")
-            or record.get("tunnel-port")
-            or record.get("tunnel_port")
-        )
-        if rsd_address and rsd_port:
-            return str(rsd_address), str(rsd_port)
+def _pick_addr_port(record):
+    if not isinstance(record, dict):
         return None
-
-    if isinstance(data, dict):
-        direct = pick_addr_port(data)
-        if direct:
-            return direct
-
-        for _, info in data.items():
-            if isinstance(info, list):
-                for item in info:
-                    matched = pick_addr_port(item)
-                    if matched:
-                        return matched
-            else:
-                matched = pick_addr_port(info)
-                if matched:
-                    return matched
-
-    if isinstance(data, list):
-        for item in data:
-            matched = pick_addr_port(item)
-            if matched:
-                return matched
-
+    rsd_address = (
+        record.get("rsd_address")
+        or record.get("tunnel-address")
+        or record.get("tunnel_address")
+    )
+    rsd_port = (
+        record.get("rsd_port")
+        or record.get("tunnel-port")
+        or record.get("tunnel_port")
+    )
+    if rsd_address and rsd_port:
+        return str(rsd_address), str(rsd_port)
     return None
+
+
+def extract_rsd_pairs(data):
+    """Return every (address, port) pair found in one device's tunneld record(s).
+
+    tunneld lists a device as a list of tunnel dicts; a single dict is also
+    accepted. Order is preserved and duplicates are dropped.
+    """
+    records = data if isinstance(data, list) else [data]
+    pairs = []
+    for record in records:
+        matched = _pick_addr_port(record)
+        if matched and matched not in pairs:
+            pairs.append(matched)
+    return pairs
+
+
+def extract_rsd_pair(data):
+    """Return the first RSD pair from one device's tunneld record(s), or None."""
+    pairs = extract_rsd_pairs(data)
+    return pairs[0] if pairs else None
 
 
 def get_tunneld_snapshot(log_path=None):
@@ -384,31 +384,42 @@ def get_tunneld_snapshot(log_path=None):
     return response.json()
 
 
-def get_latest_rsd(log_path=None, udid=None):
+def snapshot_rsd_candidates(udid, log_path=None, retries=RSD_FETCH_RETRIES):
+    """Return the RSD pairs tunneld currently exposes for exactly this UDID.
+
+    Returns a (possibly empty) list when tunneld answered, and None when tunneld
+    could not be queried at all. Tunnels registered under other UDIDs are never
+    used as a fallback.
+    """
     last_error = None
-    for attempt in range(1, RSD_FETCH_RETRIES + 1):
+    for attempt in range(1, retries + 1):
         try:
             data = get_tunneld_snapshot(log_path)
-            if udid and isinstance(data, dict) and udid in data:
-                rsd_pair = extract_rsd_pair(data[udid])
+        except Exception as exc:
+            last_error = f"无法获取 tunneld 状态，请检查 tunneld 是否正在运行: {exc}"
+        else:
+            if not isinstance(data, dict):
+                last_error = f"tunneld 返回了无法识别的内容: {data}"
+            elif udid not in data:
+                log_message(f"[*] tunneld 中尚无设备 {udid} 的 tunnel。", log_path)
+                return []
             else:
-                rsd_pair = extract_rsd_pair(data)
-            if rsd_pair:
-                log_message(f"[*] 获取到 RSD: {rsd_pair[0]} {rsd_pair[1]}", log_path)
-                return rsd_pair
-            last_error = f"未在 tunneld 返回中找到可用地址/端口，返回内容: {data}"
-        except Exception as e:
-            last_error = f"无法获取 RSD 信息，请检查 tunneld 是否正在运行: {e}"
+                candidates = extract_rsd_pairs(data[udid])
+                if candidates:
+                    listed = ", ".join(f"{addr} {port}" for addr, port in candidates)
+                    log_message(f"[*] tunneld 中设备 {udid} 的 RSD: {listed}", log_path)
+                    return candidates
+                last_error = f"tunneld 中设备 {udid} 的记录缺少地址/端口: {data[udid]}"
 
-        if attempt < RSD_FETCH_RETRIES:
+        if attempt < retries:
             log_message(
-                f"[!] 获取 RSD 失败，{RETRY_DELAY_SECONDS} 秒后重试 ({attempt}/{RSD_FETCH_RETRIES})。",
+                f"[!] 获取 RSD 失败，{RETRY_DELAY_SECONDS} 秒后重试 ({attempt}/{retries})。",
                 log_path,
             )
             time.sleep(RETRY_DELAY_SECONDS)
 
     if last_error:
-        log_message(last_error, log_path)
+        log_message(f"[!] {last_error}", log_path)
     return None
 
 
@@ -551,62 +562,109 @@ def resolve_device_udid(pmd3_bin, log_path=None, device_flag=None):
 
 
 def request_fresh_rsd(udid, log_path=None):
-    last_error = None
-    for attempt in range(1, RSD_FETCH_RETRIES + 1):
-        for connection_type in ("usbmux", "usb", "wifi", None):
-            params = {"udid": udid}
-            if connection_type:
-                params["connection_type"] = connection_type
-            try:
-                response = requests.get(
-                    f"{TUNNELD_URL}/start-tunnel",
-                    params=params,
-                    timeout=TUNNELD_REQUEST_TIMEOUT_SECONDS,
-                )
-                response.raise_for_status()
-                data = response.json()
-                address = data.get("address")
-                port = data.get("port")
-                if address and port:
-                    rsd_pair = (str(address), str(port))
-                    mode_label = connection_type or "auto"
-                    log_message(
-                        f"[*] 为设备 {udid} 创建新 tunnel 成功 ({mode_label}): {address} {port}",
-                        log_path,
-                    )
-                    return rsd_pair
-                last_error = f"tunneld /start-tunnel 返回异常: {data}"
-            except Exception as exc:
-                mode_label = connection_type or "auto"
-                last_error = f"请求新 tunnel 失败 ({mode_label}): {exc}"
+    """Ask tunneld to create (or hand back) a tunnel for udid.
 
-        if attempt < RSD_FETCH_RETRIES:
+    tunneld's /start-tunnel already tries usbmux, USB and Wi-Fi itself and only
+    answers once the tunnel is up, so a single long-timeout request is issued.
+    Re-sending the request after a client-side timeout would start a second,
+    racing tunnel task inside tunneld, so on timeout the snapshot is consulted
+    instead of retrying.
+    """
+    last_error = None
+    for attempt in range(1, TUNNEL_START_RETRIES + 1):
+        log_message(
+            f"[*] 正在请求 tunneld 为设备 {udid} 建立 tunnel（最多等待 {TUNNEL_START_TIMEOUT_SECONDS} 秒）...",
+            log_path,
+        )
+        try:
+            response = requests.get(
+                f"{TUNNELD_URL}/start-tunnel",
+                params={"udid": udid},
+                timeout=TUNNEL_START_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.Timeout:
             log_message(
-                f"[!] 创建新 tunnel 失败，{RETRY_DELAY_SECONDS} 秒后重试 ({attempt}/{RSD_FETCH_RETRIES})。",
+                f"[!] 等待 tunneld 建立 tunnel 超过 {TUNNEL_START_TIMEOUT_SECONDS} 秒，改为检查 tunneld 是否已在后台完成。",
+                log_path,
+            )
+            candidates = snapshot_rsd_candidates(udid, log_path, retries=1) or []
+            if candidates:
+                return candidates[0]
+            log_message(
+                f"[!] tunneld 未能在 {TUNNEL_START_TIMEOUT_SECONDS} 秒内为设备 {udid} 建立 tunnel，请确认设备已解锁并连接。",
+                log_path,
+            )
+            return None
+        except requests.HTTPError as exc:
+            body = ""
+            if exc.response is not None:
+                body = f" {exc.response.status_code}: {(exc.response.text or '').strip()[:200]}"
+            last_error = f"tunneld /start-tunnel 返回错误{body}"
+        except requests.RequestException as exc:
+            last_error = f"请求新 tunnel 失败: {exc}"
+        except ValueError as exc:
+            last_error = f"tunneld /start-tunnel 返回了无法解析的内容: {exc}"
+        else:
+            address = data.get("address") if isinstance(data, dict) else None
+            port = data.get("port") if isinstance(data, dict) else None
+            if address and port:
+                log_message(
+                    f"[*] tunneld 已为设备 {udid} 提供 tunnel: {address} {port}",
+                    log_path,
+                )
+                return str(address), str(port)
+            last_error = f"tunneld /start-tunnel 返回异常: {data}"
+
+        if attempt < TUNNEL_START_RETRIES:
+            log_message(
+                f"[!] 建立 tunnel 失败，{RETRY_DELAY_SECONDS} 秒后重试 ({attempt}/{TUNNEL_START_RETRIES})。",
                 log_path,
             )
             time.sleep(RETRY_DELAY_SECONDS)
 
     if last_error:
-        log_message(last_error, log_path)
+        log_message(f"[!] {last_error}", log_path)
     return None
 
 
 def acquire_rsd(udid, connection_mode="auto", log_path=None):
-    rsd_pair = get_latest_rsd(log_path, udid)
-    if rsd_pair and is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
-        log_message(
-            f"[*] 复用 tunneld 中已有的 RSD: {rsd_pair[0]} {rsd_pair[1]}",
-            log_path,
-        )
-        return rsd_pair
+    """Pick a reachable RSD for udid: reuse tunneld's existing tunnels first.
 
-    if connection_mode == "rsd":
+    In "rsd" mode only existing tunnels are considered. In "auto" mode a new
+    tunnel is requested when none of the existing ones is reachable.
+    """
+    candidates = snapshot_rsd_candidates(udid, log_path)
+    if candidates is None:
         return None
 
+    for rsd_pair in candidates:
+        if is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
+            log_message(
+                f"[*] 复用 tunneld 中已有的 RSD: {rsd_pair[0]} {rsd_pair[1]}",
+                log_path,
+            )
+            return rsd_pair
+
+    if connection_mode == "rsd":
+        if candidates:
+            log_message("[!] tunneld 中现有的 RSD 均不可达；--connection rsd 模式不会创建新 tunnel。", log_path)
+        else:
+            log_message("[!] tunneld 中没有该设备的 tunnel；--connection rsd 模式不会创建新 tunnel。", log_path)
+        return None
+
+    if candidates:
+        log_message("[!] tunneld 中现有的 RSD 均不可达，尝试请求新 tunnel。", log_path)
     rsd_pair = request_fresh_rsd(udid, log_path)
-    if rsd_pair and is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
+    if not rsd_pair:
+        return None
+    if is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
         return rsd_pair
+    log_message(
+        f"[!] tunneld 返回的 RSD {rsd_pair[0]} {rsd_pair[1]} 不可达。若该 tunnel 已失效，请重启 tunneld 或重新插拔设备。",
+        log_path,
+    )
     return None
 
 
@@ -634,23 +692,6 @@ def is_rsd_reachable(host, port, log_path=None):
 
     log_message(f"[!] RSD 端口不可达: {host}:{port} ({last_error})", log_path)
     return False
-
-
-def build_location_command(pmd3_bin, action, lat=None, lon=None, rsd_pair=None):
-    cmd = [
-        pmd3_bin,
-        "developer",
-        "dvt",
-        "simulate-location",
-        action,
-    ]
-    if not rsd_pair:
-        raise ValueError("simulate-location requires an rsd pair")
-    rsd_address, rsd_port = rsd_pair
-    cmd.extend(["--rsd", rsd_address, rsd_port])
-    if action == "set":
-        cmd.extend(["--", str(lat), str(lon)])
-    return cmd
 
 
 async def _execute_dvt_location_action(rsd_pair, action, lat=None, lon=None):
@@ -696,8 +737,11 @@ async def clear_held_location(simulation, state_path):
     write_state(state_path, state)
 
 
-async def _hold_dvt_location_session(rsd_pair, lat, lon, state_path, log_path=None):
-    stop_event = asyncio.Event()
+async def _hold_dvt_location_session(
+    rsd_pair, lat, lon, state_path, log_path=None, stop_event=None
+):
+    if stop_event is None:
+        stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
     def request_stop():
@@ -712,6 +756,9 @@ async def _hold_dvt_location_session(rsd_pair, lat, lon, state_path, log_path=No
     async with RemoteServiceDiscoveryService((rsd_pair[0], int(rsd_pair[1]))) as rsd:
         async with DvtSecureSocketProxyService(rsd) as dvt:
             async with LocationSimulation(dvt) as simulation:
+                if stop_event.is_set():
+                    log_message("[*] 启动期间收到停止请求，未设置定位。", log_path)
+                    return
                 await simulation.set(float(lat), float(lon))
                 write_state(
                     state_path,
@@ -863,17 +910,10 @@ def clear_location(
             log_message("未找到有效的 RSD 隧道，无法清除定位。", log_path)
             sys.exit(1)
 
-        rsd_address, rsd_port = rsd_pair
-        cmd = build_location_command(
-            pmd3_bin,
-            "clear",
-            rsd_pair=rsd_pair,
+        log_message(
+            f"[*] 正在通过 RSD {rsd_pair[0]} {rsd_pair[1]} 清除设备 {udid} 的虚拟定位 ({attempt}/{COMMAND_RETRIES})。",
+            log_path,
         )
-        if connection_mode == "auto":
-            message = f"[*] 已为设备 {udid} 创建新 tunnel，正在清除虚拟定位 ({attempt}/{COMMAND_RETRIES}):\n{shlex.join(cmd)}"
-        else:
-            message = f"[*] 正在复用现有 RSD 清除虚拟定位 ({attempt}/{COMMAND_RETRIES}):\n{shlex.join(cmd)}"
-        log_message(message, log_path)
         if execute_dvt_location_action(rsd_pair, "clear", log_path=log_path):
             log_message("[+] 已清除虚拟定位。", log_path)
             return
