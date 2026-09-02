@@ -160,20 +160,28 @@ def read_state(state_path):
 
 
 def is_process_alive(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        return False
     if sys.platform == "win32":
         import ctypes
         kernel32 = ctypes.windll.kernel32
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        ERROR_ACCESS_DENIED = 5
         handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if handle:
             kernel32.CloseHandle(handle)
             return True
-        return False
+        # A live process owned by another user is reported as access denied.
+        return kernel32.GetLastError() == ERROR_ACCESS_DENIED
     try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
         return True
     except OSError:
         return False
+    return True
 
 
 def read_pid(pid_path):
@@ -316,22 +324,48 @@ def stop_hold_session(pid_path, state_path, log_path=None, quiet=False):
     return True
 
 
-def resolve_pymobiledevice3():
+def _is_executable_file(path):
+    return Path(path).is_file() and os.access(str(path), os.X_OK)
+
+
+def sibling_pymobiledevice3_candidates(python_executable=None):
+    """CLI paths that belong to the same environment as the running interpreter."""
+    python_path = Path(python_executable or sys.executable).resolve()
+    names = ["pymobiledevice3"]
+    if sys.platform == "win32":
+        names = ["pymobiledevice3.exe", "pymobiledevice3"]
+    candidates = [python_path.with_name(name) for name in names]
+    if sys.platform == "win32":
+        # venv/conda interpreters sit beside Scripts/, and the base installer
+        # also places console scripts under Scripts/.
+        candidates.extend(python_path.parent / "Scripts" / name for name in names)
+    return candidates
+
+
+def resolve_pymobiledevice3(required=True):
+    """Locate the pymobiledevice3 CLI.
+
+    Order: SIMLOCATION_PMD3, the CLI installed next to the running Python
+    (so module and CLI versions match), then PATH. With required=False the
+    function returns None instead of exiting when nothing is found.
+    """
     override = os.environ.get("SIMLOCATION_PMD3")
     if override:
-        if Path(override).is_file() and os.access(override, os.X_OK):
+        if _is_executable_file(override):
             return override
         print(f"环境变量 SIMLOCATION_PMD3 指向的文件不可执行: {override}")
         sys.exit(1)
+
+    for candidate in sibling_pymobiledevice3_candidates():
+        if _is_executable_file(candidate):
+            return str(candidate)
 
     found = shutil.which("pymobiledevice3")
     if found:
         return found
 
-    sibling = str(Path(sys.executable).with_name("pymobiledevice3"))
-    if Path(sibling).is_file() and os.access(sibling, os.X_OK):
-        return sibling
-
+    if not required:
+        return None
     print("未找到 pymobiledevice3 可执行文件。")
     print(
         "请安装 pymobiledevice3 后重试，或设置环境变量 SIMLOCATION_PMD3 指向其完整路径。"
@@ -370,12 +404,6 @@ def extract_rsd_pairs(data):
         if matched and matched not in pairs:
             pairs.append(matched)
     return pairs
-
-
-def extract_rsd_pair(data):
-    """Return the first RSD pair from one device's tunneld record(s), or None."""
-    pairs = extract_rsd_pairs(data)
-    return pairs[0] if pairs else None
 
 
 def get_tunneld_snapshot(log_path=None):
@@ -452,8 +480,9 @@ def discover_devices(pmd3_bin, log_path=None):
         data = get_tunneld_snapshot(log_path)
         if isinstance(data, dict):
             udids.update(data.keys())
-    except Exception:
-        pass
+    except Exception as exc:
+        if log_path:
+            log_message(f"[!] 从 tunneld 发现设备失败: {exc}", log_path)
     try:
         result = subprocess.run(
             [pmd3_bin, "usbmux", "list", "--no-color"],
@@ -465,8 +494,14 @@ def discover_devices(pmd3_bin, log_path=None):
                 for dev in devices:
                     if isinstance(dev, dict) and dev.get("UniqueDeviceID"):
                         udids.add(dev["UniqueDeviceID"])
-    except Exception:
-        pass
+        elif log_path:
+            log_message(
+                f"[!] usbmux list 退出码 {result.returncode}: {result.stderr.strip()}",
+                log_path,
+            )
+    except Exception as exc:
+        if log_path:
+            log_message(f"[!] 通过 usbmux 发现设备失败: {exc}", log_path)
     return sorted(udids)
 
 
@@ -940,6 +975,7 @@ AMAP_KEY_HINT = """\
 MAP_AMAP_HTML_PATH = PROJECT_DIR / "web" / "map-amap.html"
 MAP_OSM_HTML_PATH = PROJECT_DIR / "web" / "map-osm.html"
 MAP_SERVER_TIMEOUT_SECONDS = 300
+MAP_MAX_BODY_BYTES = 4096
 
 
 class _MapRequestHandler(BaseHTTPRequestHandler):
@@ -958,31 +994,32 @@ class _MapRequestHandler(BaseHTTPRequestHandler):
         if self.path != "/confirm":
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self.send_error(400)
+            return
+        if length <= 0:
+            self.send_error(400)
+            return
+        if length > MAP_MAX_BODY_BYTES:
+            self.send_error(413)
+            return
         body = self.rfile.read(length)
         try:
             data = json.loads(body)
-            lat = float(data["lat"])
-            lon = float(data["lon"])
+            lat, lon = validate_coordinates(data["lat"], data["lon"])
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             self.send_error(400)
             return
         self.server.picked_coords = (lat, lon)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
         resp = b'{"ok":true}'
         self.send_header("Content-Length", str(len(resp)))
         self.end_headers()
         self.wfile.write(resp)
         threading.Thread(target=self.server.shutdown, daemon=True).start()
-
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
 
     def log_message(self, format, *args):
         pass
@@ -1046,7 +1083,7 @@ def run_map_picker(amap_key=None):
 
     server = HTTPServer(("127.0.0.1", 0), _MapRequestHandler)
     port = server.server_address[1]
-    html_text = template.replace("{{PORT}}", str(port))
+    html_text = template
     if amap_key:
         html_text = html_text.replace("{{AMAP_KEY}}", amap_key)
     server.map_html = html_text.encode("utf-8")
@@ -1061,8 +1098,11 @@ def run_map_picker(amap_key=None):
     timer.daemon = True
     timer.start()
 
-    server.serve_forever()
-    timer.cancel()
+    try:
+        server.serve_forever()
+    finally:
+        timer.cancel()
+        server.server_close()
     return server.picked_coords
 
 
@@ -1274,6 +1314,25 @@ def parse_args(argv=None):
     return args
 
 
+def describe_session_state(state):
+    """Human-readable session status for one device's state file."""
+    if not state:
+        return "—"
+    status = state.get("status")
+    if status == "ready":
+        lat = state.get("lat", "?")
+        lon = state.get("lon", "?")
+        pid = state.get("pid")
+        if is_process_alive(pid):
+            return f"ready ({lat}, {lon})"
+        return f"stale (进程 {pid} 已退出，定位可能仍在生效，请执行 clear)"
+    if status == "starting":
+        return "starting"
+    if status == "error":
+        return "error"
+    return "—"
+
+
 def cmd_device_list(pmd3_bin, log_path=None):
     devices_data = read_devices()
     default = devices_data.get("default")
@@ -1292,15 +1351,7 @@ def cmd_device_list(pmd3_bin, log_path=None):
     for udid in all_udids:
         alias = reverse_alias(udid, devices_data) or "—"
         is_default = "✓" if udid == default_udid else "—"
-        state = read_state(state_path_for(udid))
-        if state and state.get("status") == "ready":
-            lat = state.get("lat", "?")
-            lon = state.get("lon", "?")
-            status_str = f"ready ({lat}, {lon})"
-        elif state and state.get("status") == "error":
-            status_str = "error"
-        else:
-            status_str = "—"
+        status_str = describe_session_state(read_state(state_path_for(udid)))
         print(f"  {udid:<40} {alias:<12} {is_default:<6} {status_str}")
 
 
@@ -1375,7 +1426,7 @@ def doctor_check(label, status, detail):
     return {"label": label, "status": status, "detail": detail}
 
 
-def collect_doctor_checks(pmd3_bin):
+def collect_doctor_checks(pmd3_bin, device_flag=None):
     checks = [
         doctor_check(
             "Python",
@@ -1394,27 +1445,36 @@ def collect_doctor_checks(pmd3_bin):
             doctor_check("pymobiledevice3 模块", "error", "当前 Python 未安装")
         )
 
-    try:
-        result = subprocess.run(
-            [pmd3_bin, "version"],
-            capture_output=True,
-            text=True,
-            timeout=CMD_TIMEOUT_SECONDS,
-        )
-        cli_version = result.stdout.strip()
-        if result.returncode == 0 and cli_version:
-            checks.append(
-                doctor_check(
-                    "pymobiledevice3 CLI",
-                    "ok",
-                    f"{pmd3_bin} ({cli_version})",
-                )
+    if not pmd3_bin:
+        checks.append(
+            doctor_check(
+                "pymobiledevice3 CLI",
+                "error",
+                "未找到可执行文件（已检查 SIMLOCATION_PMD3、当前 Python 环境和 PATH）",
             )
-        else:
-            detail = result.stderr.strip() or f"退出码 {result.returncode}"
-            checks.append(doctor_check("pymobiledevice3 CLI", "error", detail))
-    except Exception as exc:
-        checks.append(doctor_check("pymobiledevice3 CLI", "error", str(exc)))
+        )
+    else:
+        try:
+            result = subprocess.run(
+                [pmd3_bin, "version"],
+                capture_output=True,
+                text=True,
+                timeout=CMD_TIMEOUT_SECONDS,
+            )
+            cli_version = result.stdout.strip()
+            if result.returncode == 0 and cli_version:
+                checks.append(
+                    doctor_check(
+                        "pymobiledevice3 CLI",
+                        "ok",
+                        f"{pmd3_bin} ({cli_version})",
+                    )
+                )
+            else:
+                detail = result.stderr.strip() or f"退出码 {result.returncode}"
+                checks.append(doctor_check("pymobiledevice3 CLI", "error", detail))
+        except Exception as exc:
+            checks.append(doctor_check("pymobiledevice3 CLI", "error", str(exc)))
 
     try:
         snapshot = get_tunneld_snapshot()
@@ -1435,7 +1495,25 @@ def collect_doctor_checks(pmd3_bin):
 
     devices_data = read_devices()
     default = devices_data.get("default")
-    if default:
+    env_udid = os.environ.get("SIMLOCATION_UDID", "").strip() or None
+    requested = device_flag or env_udid
+    if requested:
+        udid = resolve_alias(requested, devices_data)
+        if udid == requested and not looks_like_udid(requested):
+            known = ", ".join(sorted(devices_data["aliases"])) or "无"
+            checks.append(
+                doctor_check(
+                    "目标设备",
+                    "error",
+                    f"未知的设备别名: {requested}（已注册别名: {known}）",
+                )
+            )
+            return checks
+        source = "--device" if device_flag else "SIMLOCATION_UDID"
+        target_status = "ok"
+        target_detail = f"{requested} ({udid})" if requested != udid else udid
+        target_detail = f"{target_detail}，来自 {source}"
+    elif default:
         udid = resolve_alias(default, devices_data)
         target_status = "ok"
         target_detail = f"{default} ({udid})" if default != udid else udid
@@ -1456,17 +1534,23 @@ def collect_doctor_checks(pmd3_bin):
         )
         return checks
 
-    rsd_pair = extract_rsd_pair(snapshot[udid])
-    if not rsd_pair:
+    rsd_pairs = extract_rsd_pairs(snapshot[udid])
+    if not rsd_pairs:
         checks.append(doctor_check("RSD", "error", "未找到地址和端口"))
         return checks
-    if is_rsd_reachable(rsd_pair[0], rsd_pair[1]):
-        checks.append(
-            doctor_check("RSD", "ok", f"{rsd_pair[0]}:{rsd_pair[1]} 可达")
-        )
+    reachable = []
+    unreachable = []
+    for address, port in rsd_pairs:
+        target = f"{address}:{port}"
+        (reachable if is_rsd_reachable(address, port) else unreachable).append(target)
+    if reachable:
+        detail = f"可达: {', '.join(reachable)}"
+        if unreachable:
+            detail += f"；不可达: {', '.join(unreachable)}"
+        checks.append(doctor_check("RSD", "ok", detail))
     else:
         checks.append(
-            doctor_check("RSD", "error", f"{rsd_pair[0]}:{rsd_pair[1]} 不可达")
+            doctor_check("RSD", "error", f"全部不可达: {', '.join(unreachable)}")
         )
 
     state = read_state(state_path_for(udid))
@@ -1500,8 +1584,8 @@ def doctor_exit_code(checks):
     return 1 if any(check["status"] == "error" for check in checks) else 0
 
 
-def cmd_doctor(pmd3_bin):
-    checks = collect_doctor_checks(pmd3_bin)
+def cmd_doctor(pmd3_bin, device_flag=None):
+    checks = collect_doctor_checks(pmd3_bin, device_flag=device_flag)
     markers = {"ok": "[+]", "warn": "[!]", "error": "[-]"}
     for check in checks:
         print(f"{markers[check['status']]} {check['label']}: {check['detail']}")
@@ -1529,7 +1613,7 @@ def cmd_clear_all(pmd3_bin, connection_mode="auto", log_path=None):
 if __name__ == "__main__":
     args = parse_args()
 
-    pmd3_bin = resolve_pymobiledevice3()
+    pmd3_bin = resolve_pymobiledevice3(required=args.command != "doctor")
     log_path = Path(args.log_file) if args.debug else None
 
     if log_path:
@@ -1560,7 +1644,7 @@ if __name__ == "__main__":
     if args.command == "status":
         cmd_status(pmd3_bin, log_path)
     elif args.command == "doctor":
-        doctor_result = cmd_doctor(pmd3_bin)
+        doctor_result = cmd_doctor(pmd3_bin, device_flag=device_flag)
         if doctor_result:
             sys.exit(doctor_result)
     elif args.command == "device":
