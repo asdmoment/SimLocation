@@ -136,7 +136,8 @@
 - Keep retries bounded with named constants.
 - Log retry attempts with enough context to diagnose device or tunnel issues.
 - Be careful when changing `TUNNELD_URL`; it is a user-environment assumption (overridable via `SIMLOCATION_TUNNELD_URL`).
-- Never call tunneld `/cancel`, and never send `/start-tunnel` more than once per attempt: tunneld already tries every transport itself and overlapping requests race inside it.
+- Only call tunneld `/cancel` after every tunnel registered for the device failed its reachability probe: `/start-tunnel` hands back a registered tunnel without checking it, so a dead one can only be replaced once cancelled.
+- Request a new tunnel with an explicit `connection_type`, one transport at a time (`usbmux`, then `wifi`), and never re-send a request that timed out: the tunnel task keeps running inside tunneld and overlapping requests race in it. A plain `/start-tunnel?udid=` burns its whole timeout in a bonjour scan when the device's tunnel is dead.
 - Only use RSD tunnels registered under the target UDID; do not fall back to another device's tunnel.
 
 ## User-Facing Text

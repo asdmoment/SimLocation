@@ -191,7 +191,7 @@ $ simlocation clear
 | 选项 | 作用 |
 |------|------|
 | `--device <别名或UDID>` / `-d` | 指定目标设备（见「多设备管理」） |
-| `--connection auto\|rsd` | `auto`（默认）优先复用 tunneld 中可达的 RSD，不可达时才请求新 tunnel；`rsd` 只复用现有 RSD，不创建 |
+| `--connection auto\|rsd` | `auto`（默认）优先复用 tunneld 中可达的 RSD，全部不可达时取消它们并重建；`rsd` 只复用现有 RSD，既不取消也不创建 |
 | `--debug` | 把操作日志追加写入 `var/simlocation.log`（可用 `--log-file` 改路径） |
 | `--version` | 输出当前版本 |
 
@@ -222,7 +222,11 @@ $ export SIMLOCATION_DEFAULT_LON=<你的经度>
 
 ### tunnel 的获取方式
 
-`set` 和 `clear` 只会使用 tunneld 中登记在目标设备 UDID 下的 tunnel，不会借用其他设备的地址。默认的 `auto` 模式会先逐个探测这些 tunnel 是否可达；都不可达时才向 tunneld 发一次 `/start-tunnel` 请求。tunneld 自己会依次尝试 usbmux、USB 和 Wi-Fi，并在 tunnel 建好后才返回，所以 SimLocation 最多等待 45 秒，不会重复发起请求。
+`set` 和 `clear` 只会使用 tunneld 中登记在目标设备 UDID 下的 tunnel，不会借用其他设备的地址。默认的 `auto` 模式先逐个探测这些 tunnel 是否可达，可达就直接复用。
+
+如果登记的 tunnel 全部不可达（常见于设备重新插拔、切换网络之后），SimLocation 会先请求 tunneld 取消这些失效 tunnel，再重新建立。这一步是必需的：tunneld 收到 `/start-tunnel` 时只检查该 UDID 下有没有登记的 tunnel，不检查它是否还能用，所以不取消就会一直拿回同一个坏地址。
+
+重建时按 usbmux（最多 10 秒）、Wi-Fi（最多 45 秒）的顺序逐个尝试，每次只请求一种传输方式。USB 连接的设备通常在 0.3 秒内就能拿到新 tunnel。已超时的请求不会重发，因为 tunnel 任务仍在 tunneld 内部继续跑，重发只会产生互相竞争的任务。
 
 在手机热点或 Wi-Fi tunnel 建立较慢的环境中，后台 DVT 会话可能需要数十秒才能就绪。SimLocation 默认等待 60 秒；如需调整，可以设置：
 
@@ -230,7 +234,7 @@ $ export SIMLOCATION_DEFAULT_LON=<你的经度>
 export SIMLOCATION_START_TIMEOUT_SECONDS=90
 ```
 
-该值必须是大于 0 的秒数，并且应大于 45 秒的 tunnel 请求等待时间。真正超时后，SimLocation 会终止未就绪的后台进程，避免命令报错后又迟到地修改定位。
+该值必须是大于 0 的秒数，并且应大于两次 tunnel 请求的等待上限之和（10 + 45 = 55 秒）。真正超时后，SimLocation 会终止未就绪的后台进程，避免命令报错后又迟到地修改定位。
 
 如果 tunneld 没有跑在默认的 `http://127.0.0.1:49151`，可以用 `SIMLOCATION_TUNNELD_URL` 指定。
 
