@@ -8,18 +8,18 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
 import shutil
 import socket
 import time
 import threading
 import webbrowser
-from contextlib import suppress
+from contextlib import redirect_stderr
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Optional
 from pymobiledevice3.remote.remote_service_discovery import (
     RemoteServiceDiscoveryService,
 )
@@ -98,6 +98,28 @@ def reverse_alias(udid, devices_data):
         if u == udid:
             return alias
     return None
+
+
+UDID_PATTERN = re.compile(r"^(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}|[0-9A-Fa-f]{40})$")
+
+
+def looks_like_udid(value):
+    """Return True when value has the shape of a modern or legacy iOS UDID."""
+    return bool(value) and UDID_PATTERN.match(value) is not None
+
+
+def validate_coordinates(lat, lon):
+    """Parse and range-check a lat/lon pair. Raises ValueError with a Chinese message."""
+    try:
+        lat_value = float(lat)
+        lon_value = float(lon)
+    except (TypeError, ValueError):
+        raise ValueError(f"坐标必须是数字，收到: {lat} {lon}") from None
+    if not (-90.0 <= lat_value <= 90.0):
+        raise ValueError(f"纬度必须在 -90 到 90 之间，收到: {lat}")
+    if not (-180.0 <= lon_value <= 180.0):
+        raise ValueError(f"经度必须在 -180 到 180 之间，收到: {lon}")
+    return lat_value, lon_value
 
 
 def pid_path_for(udid):
@@ -439,6 +461,13 @@ def discover_devices(pmd3_bin, log_path=None):
 
 def interactive_device_select(udids, devices_data, log_path=None):
     """Prompt user to select a device from a list. Returns UDID."""
+    if not sys.stdin.isatty():
+        log_message(
+            "[!] 检测到多台设备，但当前不是交互终端，无法选择。"
+            "请使用 --device 或 SIMLOCATION_UDID 指定设备。",
+            log_path,
+        )
+        sys.exit(1)
     print("[?] 检测到多台设备，请选择：")
     for i, udid in enumerate(udids, 1):
         alias = reverse_alias(udid, devices_data)
@@ -447,11 +476,16 @@ def interactive_device_select(udids, devices_data, log_path=None):
     while True:
         try:
             choice = input("请输入序号: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print("[!] 已取消设备选择。")
+            sys.exit(1)
+        try:
             idx = int(choice) - 1
-            if 0 <= idx < len(udids):
-                return udids[idx]
-        except (ValueError, EOFError, KeyboardInterrupt):
-            pass
+        except ValueError:
+            idx = -1
+        if 0 <= idx < len(udids):
+            return udids[idx]
         print(f"[!] 请输入 1-{len(udids)} 之间的数字。")
 
 
@@ -467,6 +501,14 @@ def resolve_device_udid(pmd3_bin, log_path=None, device_flag=None):
     # 1. Explicit --device flag
     if device_flag:
         udid = resolve_alias(device_flag, devices_data)
+        if udid == device_flag and not looks_like_udid(udid):
+            known = ", ".join(sorted(devices_data["aliases"])) or "无"
+            log_message(
+                f"[!] 未知的设备别名: {device_flag}（已注册别名: {known}）。"
+                "请先执行 simlocation device add，或直接传入完整 UDID。",
+                log_path,
+            )
+            sys.exit(1)
         log_message(f"[*] 使用指定设备: {udid}", log_path)
         return udid
 
@@ -984,32 +1026,59 @@ def run_map_picker(amap_key=None):
     return server.picked_coords
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        prog="simlocation",
-        description="通过 pymobiledevice3 自动设置 iPhone 虚拟定位。",
-    )
+def add_common_options(parser, for_subcommand=False):
+    """Attach options that are valid both before and after the subcommand.
+
+    Subcommand copies use SUPPRESS defaults so they never overwrite a value
+    that was already parsed at the top level (argparse copies subparser
+    defaults back into the main namespace).
+    """
+
+    def default(value):
+        return argparse.SUPPRESS if for_subcommand else value
+
     parser.add_argument(
         "--debug",
         action="store_true",
+        default=default(False),
         help="记录详细日志到文件，便于排查热点场景下的不稳定问题",
     )
     parser.add_argument(
         "--log-file",
-        default=str(DEFAULT_LOG_PATH),
+        default=default(str(DEFAULT_LOG_PATH)),
         help="调试日志文件路径，默认写到项目目录下的 var/simlocation.log",
     )
     parser.add_argument(
         "--connection",
         choices=("auto", "rsd"),
-        default="auto",
-        help="连接模式。auto 会让 tunneld 为当前设备创建新 tunnel；rsd 复用 tunneld 当前已有的 RSD。",
+        default=default("auto"),
+        help="连接模式。auto 优先复用 tunneld 中可达的 RSD，不可达时才请求新 tunnel；rsd 只复用现有 RSD，不创建。",
     )
     parser.add_argument(
         "--device", "-d",
-        default=None,
+        default=default(None),
         help="目标设备（别名或 UDID）",
     )
+
+
+def read_project_version():
+    try:
+        return (PROJECT_DIR / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="simlocation",
+        description="通过 pymobiledevice3 自动设置 iPhone 虚拟定位。",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {read_project_version()}",
+    )
+    add_common_options(parser)
     parser.add_argument("--_hold-session", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--pid-file", default=str(DEFAULT_PID_PATH), help=argparse.SUPPRESS
@@ -1028,15 +1097,18 @@ def parse_args():
 
     # simlocation set <lat> <lon>
     sub_set = subparsers.add_parser("set", help="设置虚拟定位")
+    add_common_options(sub_set, for_subcommand=True)
     sub_set.add_argument("lat", help="纬度")
     sub_set.add_argument("lon", help="经度")
 
     # simlocation clear
     sub_clear = subparsers.add_parser("clear", help="清除虚拟定位，恢复真实位置")
+    add_common_options(sub_clear, for_subcommand=True)
     sub_clear.add_argument("--all", action="store_true", dest="clear_all", help="清除所有设备的虚拟定位")
 
     # simlocation map [--pick-only]
     sub_map = subparsers.add_parser("map", help="打开地图选点，选择后自动设置定位")
+    add_common_options(sub_map, for_subcommand=True)
     sub_map.add_argument(
         "--pick-only",
         action="store_true",
@@ -1044,98 +1116,120 @@ def parse_args():
     )
 
     # simlocation status
-    subparsers.add_parser("status", help="查看所有设备定位状态")
+    sub_status = subparsers.add_parser("status", help="查看所有设备定位状态")
+    add_common_options(sub_status, for_subcommand=True)
 
     # simlocation doctor
-    subparsers.add_parser("doctor", help="只读检查运行环境、tunneld 和设备连接")
+    sub_doctor = subparsers.add_parser("doctor", help="只读检查运行环境、tunneld 和设备连接")
+    add_common_options(sub_doctor, for_subcommand=True)
 
     # simlocation device {list,add,remove,default}
     sub_device = subparsers.add_parser("device", help="设备管理")
+    add_common_options(sub_device, for_subcommand=True)
     device_subparsers = sub_device.add_subparsers(dest="device_command")
 
-    device_subparsers.add_parser("list", help="列出所有设备")
+    sub_device_list = device_subparsers.add_parser("list", help="列出所有设备")
+    add_common_options(sub_device_list, for_subcommand=True)
 
     sub_device_add = device_subparsers.add_parser("add", help="注册设备别名")
+    add_common_options(sub_device_add, for_subcommand=True)
     sub_device_add.add_argument("alias", help="设备别名")
     sub_device_add.add_argument("udid", nargs="?", default=None, help="设备 UDID（省略则交互选择）")
 
     sub_device_remove = device_subparsers.add_parser("remove", help="删除设备别名")
+    add_common_options(sub_device_remove, for_subcommand=True)
     sub_device_remove.add_argument("alias", help="要删除的别名")
 
     sub_device_default = device_subparsers.add_parser("default", help="设置或查看默认设备")
+    add_common_options(sub_device_default, for_subcommand=True)
     sub_device_default.add_argument("name", nargs="?", default=None, help="别名或 UDID（省略则查看当前默认）")
+
+    return parser
+
+
+def parse_legacy_args(raw):
+    """Parse the pre-subcommand syntax: simlocation [options] <lat> <lon> | --clear."""
+    legacy_parser = argparse.ArgumentParser(add_help=False)
+    legacy_parser.add_argument("--clear", action="store_true")
+    legacy_parser.add_argument("--debug", action="store_true")
+    legacy_parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
+    legacy_parser.add_argument("--connection", choices=("auto", "rsd"), default="auto")
+    legacy_parser.add_argument("--device", "-d", default=None)
+    legacy_parser.add_argument("--_hold-session", action="store_true")
+    legacy_parser.add_argument("--pid-file", default=str(DEFAULT_PID_PATH))
+    legacy_parser.add_argument("--state-file", default=str(DEFAULT_STATE_PATH))
+    args, positional = legacy_parser.parse_known_args(raw)
+    args.command = None
+    return args, positional
+
+
+def env_default_coordinates():
+    env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
+    env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
+    if env_lat is not None and env_lon is not None:
+        return env_lat, env_lon
+    return None
+
+
+def parse_args(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = build_parser()
 
     # Try normal parse first; if it fails on subcommand matching,
     # fall back to legacy positional arg handling.
     try:
-        _stderr = sys.stderr
-        _null_stderr = open(os.devnull, "w")
-        sys.stderr = _null_stderr
-        args, remaining = parser.parse_known_args()
-        sys.stderr = _stderr
-        _null_stderr.close()
+        with open(os.devnull, "w") as null_stderr, redirect_stderr(null_stderr):
+            args, remaining = parser.parse_known_args(argv)
     except SystemExit as e:
-        sys.stderr = _stderr
-        _null_stderr.close()
         if e.code == 0:
-            # --help or similar triggered a clean exit
+            # --help / --version triggered a clean exit
             sys.exit(0)
         # argparse exits on error — intercept to handle legacy format.
-        # Re-parse without subparsers: strip argv to find bare lat/lon.
-        raw = sys.argv[1:]
-        legacy_parser = argparse.ArgumentParser(add_help=False)
-        legacy_parser.add_argument("--clear", action="store_true")
-        legacy_parser.add_argument("--debug", action="store_true")
-        legacy_parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
-        legacy_parser.add_argument("--connection", choices=("auto", "rsd"), default="auto")
-        legacy_parser.add_argument("--device", "-d", default=None)
-        legacy_parser.add_argument("--_hold-session", action="store_true")
-        legacy_parser.add_argument("--pid-file", default=str(DEFAULT_PID_PATH))
-        legacy_parser.add_argument("--state-file", default=str(DEFAULT_STATE_PATH))
-        largs, positional = legacy_parser.parse_known_args(raw)
+        args, remaining = parse_legacy_args(argv)
 
-        args = largs
-        args.command = None
-        remaining = positional
+    if args.command is not None and remaining:
+        parser.error(f"无法识别的参数: {' '.join(remaining)}")
 
     # Backward compat: simlocation <lat> <lon> (no subcommand)
-    if args.command is None and not getattr(args, "clear", False) and not getattr(args, "_hold_session", False):
+    if args.command is None and not args.clear and not args._hold_session:
         if len(remaining) >= 2:
             args.command = "set"
-            args.lat = remaining[0]
-            args.lon = remaining[1]
+            args.lat, args.lon = remaining[0], remaining[1]
+            remaining = remaining[2:]
+            if remaining:
+                parser.error(f"无法识别的参数: {' '.join(remaining)}")
         elif len(remaining) == 0:
-            env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
-            env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
-            if env_lat is not None and env_lon is not None:
-                args.command = "set"
-                args.lat = env_lat
-                args.lon = env_lon
-            else:
+            coords = env_default_coordinates()
+            if coords is None:
                 parser.print_help()
                 sys.exit(1)
-        elif remaining:
+            args.command = "set"
+            args.lat, args.lon = coords
+        else:
             parser.error(f"无法识别的参数: {' '.join(remaining)}")
 
     # Backward compat: --clear flag
-    if getattr(args, "clear", False) and args.command is None:
+    if args.clear and args.command is None:
         args.command = "clear"
 
     # _hold-session needs lat/lon
-    if getattr(args, "_hold_session", False) and args.command is None:
+    if args._hold_session and args.command is None:
         if len(remaining) >= 2:
             args.command = "set"
-            args.lat = remaining[0]
-            args.lon = remaining[1]
+            args.lat, args.lon = remaining[0], remaining[1]
         else:
-            env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
-            env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
-            if env_lat is not None and env_lon is not None:
-                args.command = "set"
-                args.lat = env_lat
-                args.lon = env_lon
-            else:
+            coords = env_default_coordinates()
+            if coords is None:
                 parser.error("_hold-session 需要坐标参数。")
+            args.command = "set"
+            args.lat, args.lon = coords
+
+    if args.command == "set":
+        try:
+            validate_coordinates(args.lat, args.lon)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     return args
 
@@ -1172,6 +1266,12 @@ def cmd_device_list(pmd3_bin, log_path=None):
 
 def cmd_device_add(alias, udid, pmd3_bin, log_path=None):
     devices_data = read_devices()
+    if looks_like_udid(alias):
+        print(f"[!] 别名不能是 UDID 形式: {alias}")
+        sys.exit(1)
+    if udid and not looks_like_udid(udid):
+        print(f"[!] UDID 格式不正确: {udid}")
+        sys.exit(1)
     if not udid:
         discovered = discover_devices(pmd3_bin, log_path)
         if not discovered:
@@ -1181,8 +1281,11 @@ def cmd_device_add(alias, udid, pmd3_bin, log_path=None):
             udid = discovered[0]
         else:
             udid = interactive_device_select(discovered, devices_data, log_path)
+    previous = devices_data["aliases"].get(alias)
     devices_data["aliases"][alias] = udid
     write_devices(devices_data)
+    if previous and previous != udid:
+        print(f"[*] 别名 {alias} 原先指向 {previous}，已更新。")
     print(f"[+] 已注册别名: {alias} → {udid}")
 
 
@@ -1213,9 +1316,14 @@ def cmd_device_default(name=None):
         else:
             print("[*] 未设置默认设备。")
         return
+    udid = resolve_alias(name, devices_data)
+    if udid == name and not looks_like_udid(name):
+        known = ", ".join(sorted(devices_data["aliases"])) or "无"
+        print(f"[!] 未知的设备别名: {name}（已注册别名: {known}）。")
+        print("    请先执行 simlocation device add 注册别名，或直接传入完整 UDID。")
+        sys.exit(1)
     devices_data["default"] = name
     write_devices(devices_data)
-    udid = resolve_alias(name, devices_data)
     print(f"[+] 默认设备已设置为: {name}" + (f" ({udid})" if name != udid else ""))
 
 
