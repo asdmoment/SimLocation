@@ -793,6 +793,61 @@ class RsdReachabilityTests(unittest.TestCase):
         self.assertIn("RSD 端口可达", buffer.getvalue())
 
 
+class TableFormattingTests(unittest.TestCase):
+    def test_display_width_counts_wide_characters_twice(self):
+        self.assertEqual(simlocation.display_width("abc"), 3)
+        self.assertEqual(simlocation.display_width("别名"), 4)
+        self.assertEqual(simlocation.display_width("AuNekoのiPhone15Pro"), 19)
+
+    def test_pad_display_fills_terminal_cells_not_code_points(self):
+        padded = simlocation.pad_display("别名", 12)
+        self.assertEqual(simlocation.display_width(padded), 12)
+        self.assertEqual(len(padded), 10)
+
+    def test_device_list_aligns_status_column_for_cjk_aliases(self):
+        devices = {
+            "default": "phone",
+            "aliases": {
+                "phone": "00008130-000845CC01EA001C",
+                "AuNekoのiPhone15Pro": "00008110-001A2B3C4D5E6F70",
+            },
+        }
+        buffer = io.StringIO()
+        with (
+            patch.object(simlocation, "read_devices", return_value=devices),
+            patch.object(simlocation, "discover_devices", return_value=[]),
+            patch.object(simlocation, "read_state", return_value=None),
+            contextlib.redirect_stdout(buffer),
+        ):
+            simlocation.cmd_device_list("pmd3")
+
+        header, _separator, *rows = buffer.getvalue().splitlines()
+        self.assertEqual(len(rows), 2)
+        columns = {simlocation.display_width(header[: header.rfind("状态")])}
+        for row in rows:
+            columns.add(simlocation.display_width(row[: row.rfind("—")]))
+        self.assertEqual(len(columns), 1, buffer.getvalue())
+
+
+class ClearAllTests(unittest.TestCase):
+    def test_clear_all_ignores_state_files_not_named_after_a_udid(self):
+        udid = "00008130-000845CC01EA001C"
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            for name in ("simlocation", udid):
+                (runtime_dir / f"{name}.state.json").write_text(
+                    json.dumps({"status": "ready", "pid": 1}), encoding="utf-8"
+                )
+            with (
+                patch.object(simlocation, "RUNTIME_DIR", runtime_dir),
+                patch.object(simlocation, "clear_location") as clear,
+            ):
+                simlocation.cmd_clear_all("pmd3")
+
+        clear.assert_called_once()
+        self.assertEqual(clear.call_args.kwargs["udid"], udid)
+
+
 class DoctorTests(unittest.TestCase):
     def test_parser_accepts_doctor_subcommand(self):
         with patch.object(sys, "argv", ["simlocation", "doctor"]):
