@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import importlib.util
 import io
@@ -207,8 +208,8 @@ class TunnelSelectionTests(unittest.TestCase):
         with (
             patch.object(
                 simlocation,
-                "get_latest_rsd",
-                return_value=("fd00::1", "1234"),
+                "snapshot_rsd_candidates",
+                return_value=[("fd00::1", "1234")],
             ),
             patch.object(simlocation, "is_rsd_reachable", return_value=True),
             patch.object(simlocation, "request_fresh_rsd") as fresh,
@@ -219,12 +220,33 @@ class TunnelSelectionTests(unittest.TestCase):
             )
             fresh.assert_not_called()
 
+    def test_auto_tries_every_snapshot_candidate_before_starting_tunnel(self):
+        with (
+            patch.object(
+                simlocation,
+                "snapshot_rsd_candidates",
+                return_value=[("fd00::1", "1234"), ("fd00::9", "4321")],
+            ),
+            patch.object(
+                simlocation,
+                "is_rsd_reachable",
+                side_effect=(False, True),
+            ) as reachable,
+            patch.object(simlocation, "request_fresh_rsd") as fresh,
+        ):
+            self.assertEqual(
+                simlocation.acquire_rsd("udid", "auto"),
+                ("fd00::9", "4321"),
+            )
+            self.assertEqual(reachable.call_count, 2)
+            fresh.assert_not_called()
+
     def test_auto_requests_fresh_tunnel_when_snapshot_is_unreachable(self):
         with (
             patch.object(
                 simlocation,
-                "get_latest_rsd",
-                return_value=("fd00::1", "1234"),
+                "snapshot_rsd_candidates",
+                return_value=[("fd00::1", "1234")],
             ),
             patch.object(
                 simlocation,
@@ -243,15 +265,57 @@ class TunnelSelectionTests(unittest.TestCase):
             )
             fresh.assert_called_once_with("udid", None)
 
+    def test_auto_does_not_start_tunnel_when_tunneld_is_unreachable(self):
+        with (
+            patch.object(simlocation, "snapshot_rsd_candidates", return_value=None),
+            patch.object(simlocation, "request_fresh_rsd") as fresh,
+        ):
+            self.assertIsNone(simlocation.acquire_rsd("udid", "auto"))
+            fresh.assert_not_called()
+
     def test_rsd_mode_does_not_create_tunnel_when_snapshot_is_missing(self):
         with (
-            patch.object(simlocation, "get_latest_rsd", return_value=None),
+            patch.object(simlocation, "snapshot_rsd_candidates", return_value=[]),
             patch.object(simlocation, "request_fresh_rsd") as fresh,
         ):
             self.assertIsNone(simlocation.acquire_rsd("udid", "rsd"))
             fresh.assert_not_called()
 
-    def test_request_fresh_rsd_does_not_cancel_existing_tunnel(self):
+    def test_snapshot_never_falls_back_to_another_devices_tunnel(self):
+        snapshot = {
+            "other-udid": [{"tunnel-address": "fd00::1", "tunnel-port": 1234}],
+        }
+        with patch.object(simlocation, "get_tunneld_snapshot", return_value=snapshot):
+            self.assertEqual(simlocation.snapshot_rsd_candidates("udid"), [])
+
+    def test_snapshot_returns_every_tunnel_of_the_target_device(self):
+        snapshot = {
+            "udid": [
+                {"tunnel-address": "fd00::1", "tunnel-port": 1234, "interface": "usb"},
+                {"tunnel-address": "fd00::2", "tunnel-port": 5678, "interface": "wifi"},
+                {"tunnel-address": "fd00::1", "tunnel-port": 1234},
+            ],
+            "other-udid": [{"tunnel-address": "fd00::9", "tunnel-port": 9}],
+        }
+        with patch.object(simlocation, "get_tunneld_snapshot", return_value=snapshot):
+            self.assertEqual(
+                simlocation.snapshot_rsd_candidates("udid"),
+                [("fd00::1", "1234"), ("fd00::2", "5678")],
+            )
+
+    def test_snapshot_returns_none_when_tunneld_cannot_be_queried(self):
+        with (
+            patch.object(
+                simlocation,
+                "get_tunneld_snapshot",
+                side_effect=RuntimeError("connection refused"),
+            ) as snapshot,
+            patch.object(simlocation.time, "sleep"),
+        ):
+            self.assertIsNone(simlocation.snapshot_rsd_candidates("udid"))
+        self.assertEqual(snapshot.call_count, simlocation.RSD_FETCH_RETRIES)
+
+    def test_request_fresh_rsd_issues_one_blocking_request_without_connection_type(self):
         response = Mock()
         response.json.return_value = {"address": "fd00::2", "port": 5678}
         with patch.object(simlocation.requests, "get", return_value=response) as get:
@@ -260,8 +324,77 @@ class TunnelSelectionTests(unittest.TestCase):
                 ("fd00::2", "5678"),
             )
 
-        requested_urls = [call.args[0] for call in get.call_args_list]
-        self.assertNotIn(f"{simlocation.TUNNELD_URL}/cancel", requested_urls)
+        get.assert_called_once()
+        self.assertEqual(get.call_args.args[0], f"{simlocation.TUNNELD_URL}/start-tunnel")
+        self.assertEqual(get.call_args.kwargs["params"], {"udid": "udid"})
+        self.assertEqual(
+            get.call_args.kwargs["timeout"],
+            simlocation.TUNNEL_START_TIMEOUT_SECONDS,
+        )
+
+    def test_request_fresh_rsd_timeout_rechecks_snapshot_instead_of_re_requesting(self):
+        with (
+            patch.object(
+                simlocation.requests,
+                "get",
+                side_effect=simlocation.requests.Timeout("read timed out"),
+            ) as get,
+            patch.object(
+                simlocation,
+                "snapshot_rsd_candidates",
+                return_value=[("fd00::3", "9")],
+            ) as snapshot,
+        ):
+            self.assertEqual(simlocation.request_fresh_rsd("udid"), ("fd00::3", "9"))
+
+        get.assert_called_once()
+        snapshot.assert_called_once_with("udid", None, retries=1)
+
+    def test_request_fresh_rsd_retries_bounded_on_http_error(self):
+        failed = Mock(status_code=501, text='{"error": "task not created"}')
+        error = simlocation.requests.HTTPError("501", response=failed)
+        with (
+            patch.object(simlocation.requests, "get", side_effect=error) as get,
+            patch.object(simlocation.time, "sleep"),
+        ):
+            self.assertIsNone(simlocation.request_fresh_rsd("udid"))
+        self.assertEqual(get.call_count, simlocation.TUNNEL_START_RETRIES)
+
+    def test_tunnel_start_timeout_fits_inside_default_hold_start_timeout(self):
+        self.assertLess(
+            simlocation.TUNNEL_START_TIMEOUT_SECONDS,
+            simlocation.HOLD_START_TIMEOUT_SECONDS,
+        )
+
+
+class HoldSessionStopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_requested_before_ready_skips_setting_location(self):
+        simulation = Mock()
+        simulation.set = AsyncMock()
+        simulation.clear = AsyncMock()
+
+        def async_cm(value):
+            cm = Mock()
+            cm.__aenter__ = AsyncMock(return_value=value)
+            cm.__aexit__ = AsyncMock(return_value=False)
+            return Mock(return_value=cm)
+
+        stop_event = asyncio.Event()
+        stop_event.set()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            with (
+                patch.object(simlocation, "RemoteServiceDiscoveryService", async_cm(Mock())),
+                patch.object(simlocation, "DvtSecureSocketProxyService", async_cm(Mock())),
+                patch.object(simlocation, "LocationSimulation", async_cm(simulation)),
+            ):
+                await simlocation._hold_dvt_location_session(
+                    ("fd00::1", "1234"), "1", "2", state_path, stop_event=stop_event
+                )
+            self.assertIsNone(simlocation.read_state(state_path))
+
+        simulation.set.assert_not_awaited()
+        simulation.clear.assert_not_awaited()
 
 
 class HoldSessionTests(unittest.TestCase):
