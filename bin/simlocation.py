@@ -13,6 +13,7 @@ import shutil
 import socket
 import time
 import threading
+import unicodedata
 import webbrowser
 from contextlib import redirect_stderr
 from datetime import datetime
@@ -67,8 +68,6 @@ COMMAND_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.5
 RSD_CONNECT_TIMEOUT_SECONDS = 2
 DEFAULT_LOG_PATH = RUNTIME_DIR / "simlocation.log"
-DEFAULT_PID_PATH = RUNTIME_DIR / "simlocation.pid"
-DEFAULT_STATE_PATH = RUNTIME_DIR / "simlocation.state.json"
 HOLD_START_TIMEOUT_SECONDS = 60
 HOLD_POLL_INTERVAL_SECONDS = 0.25
 
@@ -1202,12 +1201,9 @@ def build_parser():
     )
     add_common_options(parser)
     parser.add_argument("--_hold-session", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--pid-file", default=str(DEFAULT_PID_PATH), help=argparse.SUPPRESS
-    )
-    parser.add_argument(
-        "--state-file", default=str(DEFAULT_STATE_PATH), help=argparse.SUPPRESS
-    )
+    # Internal: start_hold_session() always passes both paths explicitly.
+    parser.add_argument("--pid-file", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--state-file", default=None, help=argparse.SUPPRESS)
     # Backward compat: --clear flag (legacy)
     parser.add_argument(
         "--clear",
@@ -1278,8 +1274,8 @@ def parse_legacy_args(raw):
     legacy_parser.add_argument("--connection", choices=("auto", "rsd"), default="auto")
     legacy_parser.add_argument("--device", "-d", default=None)
     legacy_parser.add_argument("--_hold-session", action="store_true")
-    legacy_parser.add_argument("--pid-file", default=str(DEFAULT_PID_PATH))
-    legacy_parser.add_argument("--state-file", default=str(DEFAULT_STATE_PATH))
+    legacy_parser.add_argument("--pid-file", default=None)
+    legacy_parser.add_argument("--state-file", default=None)
     args, positional = legacy_parser.parse_known_args(raw)
     args.command = None
     return args, positional
@@ -1356,6 +1352,28 @@ def parse_args(argv=None):
     return args
 
 
+def display_width(text):
+    """Terminal cells needed for text: East Asian wide/fullwidth characters take two."""
+    width = 0
+    for char in str(text):
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
+
+
+def pad_display(text, width):
+    """Left-align text in a column of `width` terminal cells (str.ljust counts code points)."""
+    text = str(text)
+    return text + " " * max(0, width - display_width(text))
+
+
+def format_table_row(cells, widths):
+    """Join cells into one row; widths apply to every column except the last."""
+    head = [pad_display(cell, width) for cell, width in zip(cells[:-1], widths)]
+    return "  " + " ".join(head + [str(cells[-1])])
+
+
 def describe_session_state(state):
     """Human-readable session status for one device's state file."""
     if not state:
@@ -1388,13 +1406,22 @@ def cmd_device_list(pmd3_bin, log_path=None):
         print("[*] 未发现任何设备。请检查设备连接和 tunneld 状态。")
         return
 
-    print(f"  {'UDID':<40} {'别名':<12} {'默认':<6} {'状态'}")
-    print(f"  {'─' * 40} {'─' * 12} {'─' * 6} {'─' * 20}")
+    rows = []
     for udid in all_udids:
         alias = reverse_alias(udid, devices_data) or "—"
         is_default = "✓" if udid == default_udid else "—"
         status_str = describe_session_state(read_state(state_path_for(udid)))
-        print(f"  {udid:<40} {alias:<12} {is_default:<6} {status_str}")
+        rows.append((udid, alias, is_default, status_str))
+
+    widths = [
+        max([40] + [display_width(row[0]) for row in rows]),
+        max([12] + [display_width(row[1]) for row in rows]),
+        6,
+    ]
+    print(format_table_row(("UDID", "别名", "默认", "状态"), widths))
+    print(format_table_row(tuple("─" * w for w in widths) + ("─" * 20,), widths))
+    for row in rows:
+        print(format_table_row(row, widths))
 
 
 def cmd_device_add(alias, udid, pmd3_bin, log_path=None):
@@ -1643,9 +1670,12 @@ def cmd_clear_all(pmd3_bin, connection_mode="auto", log_path=None):
     state_files = sorted(RUNTIME_DIR.glob("*.state.json"))
     active = []
     for sf in state_files:
+        udid = sf.name.removesuffix(".state.json")
+        if not looks_like_udid(udid):
+            # e.g. a pre-3.0 single-device simlocation.state.json left in var/
+            continue
         state = read_state(sf)
         if state and state.get("status") == "ready":
-            udid = sf.name.removesuffix(".state.json")
             active.append(udid)
 
     if not active:
@@ -1673,6 +1703,9 @@ if __name__ == "__main__":
         log_message(f"[*] tunneld URL: {TUNNELD_URL}", log_path)
 
     if args._hold_session:
+        if not args.pid_file or not args.state_file:
+            print("[-] --_hold-session 仅供内部使用，需要同时提供 --pid-file 与 --state-file。")
+            sys.exit(2)
         pid_path = Path(args.pid_file)
         state_path = Path(args.state_file)
         run_hold_session(
