@@ -182,6 +182,19 @@ $ simlocation clear
 
 > 为了向后兼容，`simlocation --clear` 也同样有效。
 
+坐标会在入口处校验：必须是数字，纬度在 -90 到 90 之间，经度在 -180 到 180 之间；多余的参数会直接报错，不会被静默忽略。
+
+### 通用选项
+
+以下选项在所有子命令上都可用，写在子命令前后均可：
+
+| 选项 | 作用 |
+|------|------|
+| `--device <别名或UDID>` / `-d` | 指定目标设备（见「多设备管理」） |
+| `--connection auto\|rsd` | `auto`（默认）优先复用 tunneld 中可达的 RSD，不可达时才请求新 tunnel；`rsd` 只复用现有 RSD，不创建 |
+| `--debug` | 把操作日志追加写入 `var/simlocation.log`（可用 `--log-file` 改路径） |
+| `--version` | 输出当前版本 |
+
 如果你只想在自己电脑上保留一组常用默认值，可以设置：
 
 ```bash
@@ -201,11 +214,15 @@ $ export SIMLOCATION_DEFAULT_LON=<你的经度>
 运行时文件默认放在 `var/` 下，包括：
 
 - `var/devices.json` — 设备别名和默认设备配置（首次运行自动创建，格式参见 `var/devices.example.json`）
-- `var/<UDID>.log` — 每台设备的会话日志
 - `var/<UDID>.pid` — 每台设备的后台进程 PID
 - `var/<UDID>.state.json` — 每台设备的会话状态
+- `var/simlocation.log` — 调试日志，仅在传入 `--debug` 时写入
 
 如果你想改位置，可以设置 `SIMLOCATION_VAR_DIR`。
+
+### tunnel 的获取方式
+
+`set` 和 `clear` 只会使用 tunneld 中登记在目标设备 UDID 下的 tunnel，不会借用其他设备的地址。默认的 `auto` 模式会先逐个探测这些 tunnel 是否可达；都不可达时才向 tunneld 发一次 `/start-tunnel` 请求。tunneld 自己会依次尝试 usbmux、USB 和 Wi-Fi，并在 tunnel 建好后才返回，所以 SimLocation 最多等待 45 秒，不会重复发起请求。
 
 在手机热点或 Wi-Fi tunnel 建立较慢的环境中，后台 DVT 会话可能需要数十秒才能就绪。SimLocation 默认等待 60 秒；如需调整，可以设置：
 
@@ -213,7 +230,9 @@ $ export SIMLOCATION_DEFAULT_LON=<你的经度>
 export SIMLOCATION_START_TIMEOUT_SECONDS=90
 ```
 
-该值必须是大于 0 的秒数。真正超时后，SimLocation 会终止未就绪的后台进程，避免命令报错后又迟到地修改定位。
+该值必须是大于 0 的秒数，并且应大于 45 秒的 tunnel 请求等待时间。真正超时后，SimLocation 会终止未就绪的后台进程，避免命令报错后又迟到地修改定位。
+
+如果 tunneld 没有跑在默认的 `http://127.0.0.1:49151`，可以用 `SIMLOCATION_TUNNELD_URL` 指定。
 
 ## 多设备管理
 
@@ -264,7 +283,7 @@ $ simlocation clear --device <别名>
 $ simlocation status
 ```
 
-显示所有设备的定位模拟状态。
+显示所有设备的定位模拟状态。如果某台设备的状态是 `ready` 但后台进程已经不在了，会显示为 `stale`，此时设备上的定位可能仍在生效，执行一次 `clear` 即可。
 
 **只读诊断**
 
@@ -272,7 +291,7 @@ $ simlocation status
 $ simlocation doctor
 ```
 
-检查当前 Python、`pymobiledevice3` 模块和 CLI、tunneld、默认设备、RSD 可达性以及后台会话状态。`doctor` 不会启动或取消 tunnel，也不会设置或清除设备定位；`[-]` 表示会阻止 SimLocation 工作的问题，`[!]` 表示建议处理但不一定阻断的警告。
+检查当前 Python、`pymobiledevice3` 模块和 CLI、tunneld、目标设备、每个 RSD 的可达性以及后台会话状态。目标设备的选择顺序与其他命令一致：`--device`、`SIMLOCATION_UDID`、默认设备、tunneld 中唯一的设备。`doctor` 不会启动或取消 tunnel，也不会设置或清除设备定位；即使找不到 `pymobiledevice3` CLI 也会继续给出其余检查结果。`[-]` 表示会阻止 SimLocation 工作的问题，`[!]` 表示建议处理但不一定阻断的警告。
 
 **批量清除**
 
@@ -355,7 +374,7 @@ $ export SIMLOCATION_AMAP_KEY=你的Key
 | 平台 | 状态 | 备注 |
 |------|------|------|
 | macOS | 完整支持 | 原生开发平台 |
-| Windows | 支持 | 需安装 iTunes 或 Apple Devices 提供 USB 驱动 |
+| Windows | 支持 | 需安装 iTunes 或 Apple Devices 提供 USB 驱动；`clear` 会直接终止后台进程，再通过一次新的 DVT 连接补偿清除，因此需要 tunnel 可达 |
 | Linux | 支持 | 需要 usbmuxd 服务运行 |
 
 本项目面向配合 iPhone 或 iPad 的本地定位测试，暂时不考虑覆盖 Android 或更通用的设备管理流程。
