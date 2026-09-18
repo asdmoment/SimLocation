@@ -4,7 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SimLocation - Map Picker (OpenStreetMap)</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<!-- HTTPS proves we reached unpkg, not that unpkg served what we expect. These
+     hashes pin the exact bytes of the pinned version; bump them together with
+     the version or the browser will refuse to load the map. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
+      crossorigin="anonymous" />
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body, #map { width: 100%; height: 100%; }
@@ -150,7 +155,9 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 <div id="provider-badge">OpenStreetMap</div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
+        crossorigin="anonymous"></script>
 <script>
 {{ROUTE_SCRIPT}}
 /* ---- App state ---- */

@@ -386,6 +386,9 @@ confirmBtn.addEventListener("click", function () {
 });
 
 /* ---- Load Amap JS API ---- */
+/* No integrity hash is possible here, unlike the pinned Leaflet build on the
+   OSM page: this URL is a generated loader whose bytes vary with the key and
+   callback, and the 2.0 line is updated in place. */
 var s = document.createElement("script");
 s.src = "https://webapi.amap.com/maps?v=2.0&key={{AMAP_KEY}}&callback=_onAMapLoaded";
 document.head.appendChild(s);
