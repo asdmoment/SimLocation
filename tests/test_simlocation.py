@@ -768,6 +768,104 @@ class MapServerTests(unittest.TestCase):
         self.assertFalse(self.thread.is_alive())
 
 
+class MapAccessTokenTests(unittest.TestCase):
+    """A non-loopback bind turns the URL into the credential."""
+
+    TOKEN = "s3cret-token-value"
+
+    def setUp(self):
+        self.server = simlocation.HTTPServer(("127.0.0.1", 0), simlocation._MapRequestHandler)
+        self.server.map_html = b"<html>map</html>"
+        self.server.picked_coords = None
+        self.server.access_token = self.TOKEN
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.port = self.server.server_address[1]
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+
+    def request(self, method, path, body=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request(method, path, body=body, headers={"Content-Type": "application/json"})
+            response = conn.getresponse()
+            return response.status, response.read()
+        finally:
+            conn.close()
+
+    def test_get_without_token_is_forbidden(self):
+        status, _ = self.request("GET", "/")
+        self.assertEqual(status, 403)
+
+    def test_get_with_wrong_token_is_forbidden(self):
+        status, _ = self.request("GET", "/?t=not-the-token")
+        self.assertEqual(status, 403)
+
+    def test_get_with_correct_token_serves_map(self):
+        status, body = self.request("GET", f"/?t={self.TOKEN}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"<html>map</html>")
+
+    def test_confirm_without_token_cannot_set_coordinates(self):
+        status, _ = self.request("POST", "/confirm", body=b'{"lat": 10, "lon": 20}')
+        self.assertEqual(status, 403)
+        self.assertIsNone(self.server.picked_coords)
+
+    def test_confirm_with_token_records_coordinates(self):
+        status, body = self.request(
+            "POST", f"/confirm?t={self.TOKEN}", body=b'{"lat": 10.5, "lon": 20.5}'
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+        self.assertEqual(self.server.picked_coords, (10.5, 20.5))
+
+    def test_unknown_path_still_404s_even_with_token(self):
+        status, _ = self.request("GET", f"/admin?t={self.TOKEN}")
+        self.assertEqual(status, 404)
+
+    def test_non_ascii_token_is_forbidden_not_a_crash(self):
+        status, _ = self.request("GET", "/?t=%E4%B8%AD%E6%96%87")
+        self.assertEqual(status, 403)
+
+
+class MapBindingTests(unittest.TestCase):
+    def test_loopback_detection(self):
+        for host in ("127.0.0.1", "127.0.0.53", "localhost", "::1"):
+            self.assertTrue(simlocation.is_loopback_host(host), host)
+        # "" binds every interface, so it must count as exposed.
+        for host in ("", "0.0.0.0", "192.168.1.5", "100.64.0.11", "172.20.10.2", "::"):
+            self.assertFalse(simlocation.is_loopback_host(host), host)
+
+    def test_blank_listen_falls_back_to_loopback(self):
+        with patch.dict(os.environ, {"SIMLOCATION_MAP_LISTEN": ""}):
+            self.assertEqual(simlocation.resolve_map_listen_host(None), "127.0.0.1")
+            self.assertEqual(simlocation.resolve_map_listen_host(""), "127.0.0.1")
+            self.assertEqual(simlocation.resolve_map_listen_host("  "), "127.0.0.1")
+        with patch.dict(os.environ, {"SIMLOCATION_MAP_LISTEN": "0.0.0.0"}):
+            self.assertEqual(simlocation.resolve_map_listen_host(None), "0.0.0.0")
+            self.assertEqual(simlocation.resolve_map_listen_host("127.0.0.1"), "127.0.0.1")
+
+    def test_remote_flag_implies_public_bind_and_no_browser(self):
+        args = simlocation.parse_args(["map", "--remote"])
+        self.assertEqual(args.command, "map")
+        self.assertTrue(args.remote)
+
+    def test_listen_and_port_are_parsed(self):
+        args = simlocation.parse_args(["map", "--listen", "0.0.0.0", "--port", "18080"])
+        self.assertEqual(args.listen, "0.0.0.0")
+        self.assertEqual(args.port, 18080)
+
+    def test_map_defaults_stay_loopback(self):
+        args = simlocation.parse_args(["map"])
+        self.assertIsNone(args.listen)
+        self.assertIsNone(args.port)
+        self.assertFalse(args.no_browser)
+        self.assertFalse(args.remote)
+
+
 class RsdReachabilityTests(unittest.TestCase):
     def _listening_port(self):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

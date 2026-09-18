@@ -58,6 +58,7 @@
 - Device and binary overrides: `SIMLOCATION_PMD3`, `SIMLOCATION_UDID`
 - tunneld base URL: `SIMLOCATION_TUNNELD_URL`
 - Map picker provider key: `SIMLOCATION_AMAP_KEY`
+- Map picker binding and access: `SIMLOCATION_MAP_LISTEN`, `SIMLOCATION_MAP_PORT`, `SIMLOCATION_MAP_TIMEOUT_SECONDS`, `SIMLOCATION_MAP_TOKEN`
 
 ## Dependency Checks
 
