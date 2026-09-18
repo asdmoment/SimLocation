@@ -1,5 +1,21 @@
 # Changelog
 
+## v3.3.0
+
+- 新增运动轨迹：`simlocation route [文件]` 让设备沿一条路线持续移动，复用 `set` 已有的后台 DVT 会话。支持 `--speed`（km/h，默认 5）和 `--loop`；不加 `--loop` 时走到终点会保持在终点，不会跳回真实位置。
+- 省略文件时打开地图绘制路线：依次点击添加途经点，可拖动、撤销、重画，面板实时显示途经点数、总里程和预计耗时；「保存路线」可导出 JSON 以后复用。也接受 JSON 路线文件和单段 GPX。
+- 途经点之间走大圆路径，位置用球面线性插值计算——在 lat/lon 上走直线会偏离航线，高纬度尤其明显。正对地球两端的路段会被拒绝，因为它们没有唯一的大圆路径。
+- 位置按**实际经过的时间**推算，而不是逐次累加步长：某次 DVT 调用变慢时，下一次更新会直接跳到该到的位置，轨迹不会整体落后。
+- `status` / `device list` 显示进度、速度和圈数；轨迹与定点定位可以直接相互切换，都用 `clear` 或 `clear --all` 结束。
+- 新增远程选点：`simlocation map --remote`（等价于 `--listen 0.0.0.0 --no-browser`）让无显示器的主机把选点页面发给同网络的手机。监听非 loopback 地址会自动生成一次性访问令牌，没有令牌的请求一律 403。`route` 支持同一组选项，在手机上画路线比在电脑上更顺手。新增 `SIMLOCATION_MAP_LISTEN`、`SIMLOCATION_MAP_PORT`、`SIMLOCATION_MAP_TOKEN`、`SIMLOCATION_MAP_TIMEOUT_SECONDS`；随身部署方案见 `PORTABLE-HOST.md`。
+- 修复设备发现：`--no-color` 是 pymobiledevice3 的组级选项，9.12 起会直接拒绝 `usbmux list --no-color`，导致 tunneld 不可达时 USB 回退路径完全失效——而那正是它存在的意义。改为 `pymobiledevice3 --no-color usbmux list`，旧版本回退到不带该选项的形式。
+- 状态文件改为原子写入（临时文件 + `replace`）：移动中的会话每秒重写一次，`status` 并发读取可能读到写了一半的 JSON。
+- GPX 解析改用 `defusedxml`（pymobiledevice3 已依赖它）。标准库 ElementTree 不解析外部实体，但会展开内部实体，1 KB 的文件可以膨胀成几百 MB。
+- 地图选点的请求体上限按模式区分：单点仍是 4 KiB，路线模式放宽到 4 MiB。
+- 轨迹会话中途失败（设备拔出、DVT 出错）时会尽力清除一次再抛出，不把设备留在假位置上。
+- 测试从 71 个增加到 111 个，另有 9 个浏览器侧测试（`tests/test_map_routes.cjs`，用桩替换 Leaflet/高德 SDK 跑真实地图页面）。已在真机（iPhone 15 Pro，pymobiledevice3 9.27.0）验证轨迹回放、循环圈数、终点保持、轨迹与定点互相切换、`clear` 确认和临时文件清理。
+- 运动轨迹由 [@hoicau](https://github.com/hoicau) 在 PR #1 中贡献，本版在当前主线上重新实现并合入。
+
 ## v3.2.0
 
 - 失效 tunnel 现在可以自动恢复，不再需要手动重启 tunneld：当目标设备在 tunneld 中登记的 tunnel 全部探测不通时，`auto` 模式会先请求 `/cancel` 取消它们，再重新建立。此前 tunneld 收到 `/start-tunnel` 只检查该 UDID 下有没有登记的 tunnel，不检查它是否还能用，所以会一直返回同一个坏地址。
