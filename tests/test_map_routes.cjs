@@ -125,6 +125,20 @@ for (const provider of ["osm", "amap"]) {
   });
 }
 
+test("every pinned CDN resource carries an integrity hash", () => {
+  // Catches a new CDN reference added without SRI, or an integrity attribute
+  // dropped while editing. A version bump that keeps the stale hash still has
+  // to be caught by actually loading the page — the hash cannot be checked
+  // offline.
+  const html = fs.readFileSync(path.join(__dirname, "../web/map-osm.html"), "utf8");
+  const tags = html.match(/<(?:script|link)\b[^>]*https:\/\/unpkg\.com[^>]*>/g) || [];
+  assert.ok(tags.length >= 2, "expected the Leaflet script and stylesheet");
+  for (const tag of tags) {
+    assert.match(tag, /integrity="sha\d{3}-[A-Za-z0-9+/=]+"/, "missing integrity: " + tag);
+    assert.match(tag, /crossorigin="anonymous"/, "SRI needs crossorigin: " + tag);
+  }
+});
+
 test("Amap converts every route point from GCJ-02 to WGS-84", () => {
   const { context, add } = loadMap("amap", true);
   add(39.909, 116.397);
