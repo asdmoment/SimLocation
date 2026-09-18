@@ -706,6 +706,61 @@ class PymobiledeviceResolutionTests(unittest.TestCase):
                 simlocation.resolve_pymobiledevice3()
 
 
+class DeviceDiscoveryTests(unittest.TestCase):
+    """USB discovery is the only path left when tunneld is unreachable."""
+
+    LISTING = json.dumps([
+        {"UniqueDeviceID": "DEVICE-A"},
+        {"UniqueDeviceID": "DEVICE-B"},
+    ])
+
+    def test_group_level_no_color_is_used_first(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, self.LISTING, "")
+
+        with (
+            patch.object(simlocation, "get_tunneld_snapshot", side_effect=OSError("offline")),
+            patch.object(simlocation.subprocess, "run", side_effect=run),
+        ):
+            self.assertEqual(
+                simlocation.discover_devices("/unused/pmd3"), ["DEVICE-A", "DEVICE-B"]
+            )
+        self.assertEqual(calls, [["/unused/pmd3", "--no-color", "usbmux", "list"]])
+
+    def test_build_without_the_group_option_falls_back(self):
+        def run(argv, **kwargs):
+            if "--no-color" in argv:
+                return subprocess.CompletedProcess(argv, 2, "", "no such option --no-color")
+            return subprocess.CompletedProcess(argv, 0, self.LISTING, "")
+
+        with (
+            patch.object(simlocation, "get_tunneld_snapshot", side_effect=OSError("offline")),
+            patch.object(simlocation.subprocess, "run", side_effect=run),
+        ):
+            self.assertEqual(
+                simlocation.discover_devices("/unused/pmd3"), ["DEVICE-A", "DEVICE-B"]
+            )
+
+    def test_tunnel_and_usb_results_are_deduplicated(self):
+        listing = json.dumps([{"UniqueDeviceID": "DEVICE-A"}])
+        with (
+            patch.object(
+                simlocation, "get_tunneld_snapshot",
+                return_value={"DEVICE-A": [], "DEVICE-B": []},
+            ),
+            patch.object(
+                simlocation.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0, listing, ""),
+            ),
+        ):
+            self.assertEqual(
+                simlocation.discover_devices("/unused/pmd3"), ["DEVICE-A", "DEVICE-B"]
+            )
+
+
 class MapServerTests(unittest.TestCase):
     def setUp(self):
         self.server = simlocation.HTTPServer(("127.0.0.1", 0), simlocation._MapRequestHandler)

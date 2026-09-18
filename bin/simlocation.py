@@ -491,10 +491,18 @@ def discover_devices(pmd3_bin, log_path=None):
         if log_path:
             log_message(f"[!] 从 tunneld 发现设备失败: {exc}", log_path)
     try:
-        result = subprocess.run(
-            [pmd3_bin, "usbmux", "list", "--no-color"],
-            capture_output=True, text=True, timeout=CMD_TIMEOUT_SECONDS,
-        )
+        result = None
+        # --no-color is a group-level option: `usbmux list --no-color` is
+        # rejected outright by pymobiledevice3 9.12+, which used to make this
+        # whole fallback dead whenever tunneld was unreachable. Older builds
+        # that predate the group option still need the bare form.
+        for argv in ([pmd3_bin, "--no-color", "usbmux", "list"],
+                     [pmd3_bin, "usbmux", "list"]):
+            result = subprocess.run(
+                argv, capture_output=True, text=True, timeout=CMD_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 0:
+                break
         if result.returncode == 0:
             devices = json.loads(result.stdout)
             if isinstance(devices, list):
