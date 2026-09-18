@@ -9,15 +9,16 @@
 
 - Main Python CLI: `bin/simlocation.py`
 - POSIX shell launcher: `bin/simlocation`; Windows launcher: `bin/simlocation.cmd`
-- Map picker pages: `web/map-osm.html`, `web/map-amap.html`
+- Map picker pages: `web/map-osm.html`, `web/map-amap.html`; shared route editor: `web/map-route.js`
 - AFC helper script: `tools/pm3-afc-sync.sh`
-- Unit tests: `tests/test_simlocation.py`
+- Unit tests: `tests/test_simlocation.py`, `tests/test_routes.py`; browser-side tests: `tests/test_map_routes.cjs` (Node, no deps)
+- Example route file: `examples/route.json`
 - User docs: `README.md`; release notes: `CHANGELOG.md`; version string: `VERSION`
 - Runtime artifacts (gitignored): `var/devices.json`, `var/<UDID>.pid`, `var/<UDID>.state.json`, and `var/simlocation.log` when `--debug` is used
 
 ## What This Project Does
 
-- `SimLocation` sets or clears simulated iPhone/iPad location (cross-platform: macOS, Windows, Linux).
+- `SimLocation` sets or clears simulated iPhone/iPad location, and can replay a moving route (cross-platform: macOS, Windows, Linux).
 - It depends on `pymobiledevice3`, `requests`, a running `tunneld`, and a connected device.
 - The Python CLI maintains a background DVT session, and the shell helper handles AFC sync flows.
 
@@ -45,6 +46,7 @@
 
 - Set a simulated location: `bin/simlocation set <lat> <lon>` (legacy `bin/simlocation <lat> <lon>` still works)
 - Clear simulated location: `bin/simlocation clear` (legacy `bin/simlocation --clear` still works)
+- Replay a moving route: `bin/simlocation route [file] [--speed KMH] [--loop]`; omit the file to draw one on the map
 - Target a device: add `--device <alias|UDID>` before or after the subcommand
 - Launcher help check when deps are installed: `bin/simlocation --help`; version: `bin/simlocation --version`
 - CLI help check when Python deps are installed: `python3 bin/simlocation.py --help`
@@ -67,6 +69,7 @@
 ## Verification Commands
 
 - Unit tests: `python3 -m unittest discover -s tests -v` (the interpreter must import `requests` and `pymobiledevice3`; run with the same Python you point `SIMLOCATION_PYTHON` at)
+- Browser-side tests: `node tests/test_map_routes.cjs` (stdlib `node:test`; the `.cjs` extension keeps it CommonJS regardless of any `package.json` above the checkout)
 - Python syntax check: `python3 -m py_compile bin/simlocation.py`
 - Shell syntax check: `bash -n bin/simlocation`
 - Shell helper syntax check: `bash -n tools/pm3-afc-sync.sh`
