@@ -8,6 +8,8 @@
 ## Repository Snapshot
 
 - Main Python CLI: `bin/simlocation.py`
+- Shared map route editor: `web/map-route.js`
+- Example route: `examples/route.json`
 - POSIX shell launcher: `bin/simlocation`
 - AFC helper script: `tools/pm3-afc-sync.sh`
 - Root helper symlink: `pm3-afc-sync.sh -> tools/pm3-afc-sync.sh`
@@ -30,7 +32,7 @@
 
 - There is no `pyproject.toml`, `package.json`, `Makefile`, `pytest.ini`, or `tox.ini`.
 - There is no repo-defined lint command.
-- Regression tests use standard-library `unittest` in `tests/test_simlocation.py`.
+- Regression tests use standard-library `unittest` in `tests/test_simlocation.py` and `tests/test_routes.py`.
 - Treat this as a script-first repository; hardware verification remains manual.
 
 ## Environment Assumptions
@@ -44,6 +46,8 @@
 
 - Run the main CLI through the launcher: `bin/simlocation <lat> <lon>`
 - Clear simulated location: `bin/simlocation --clear`
+- Draw a movement route: `bin/simlocation route --speed 5`
+- Replay a route: `bin/simlocation route examples/route.json --speed 5`
 - Launcher help check when deps are installed: `bin/simlocation --help`
 - CLI help check when Python deps are installed: `python3 bin/simlocation.py --help`
 - AFC helper help: `bash tools/pm3-afc-sync.sh --help`
@@ -61,6 +65,7 @@
 ## Verification Commands
 
 - Regression tests without device dependencies: `python3 -B -m unittest discover -s tests -v`
+- Map editor contract tests with Node.js, no npm dependencies: `node tests/test_map_routes.js`
 - Python syntax check: `python3 -m py_compile bin/simlocation.py`
 - Shell syntax check: `bash -n bin/simlocation`
 - Shell helper syntax check: `bash -n tools/pm3-afc-sync.sh`

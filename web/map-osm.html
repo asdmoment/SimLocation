@@ -116,6 +116,15 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
   padding: 3px 8px;
   border-radius: 4px;
 }
+#route-controls { margin-bottom: 12px; }
+#route-controls button { border: 0; border-radius: 6px; padding: 7px 10px; background: #f0f2f5; color: #333; cursor: pointer; font: inherit; font-size: 13px; }
+#route-hint { font-size: 12px; line-height: 1.6; color: #666; margin-bottom: 10px; }
+button:disabled { opacity: 0.45; cursor: default; }
+@media (max-width: 480px) {
+  #search-box { left: 56px; right: 12px; }
+  #search-input { width: 100%; }
+  #panel { bottom: 28px; width: calc(100% - 24px); min-width: 0; padding: 16px; }
+}
 </style>
 </head>
 <body>
@@ -129,6 +138,12 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
 
 <div id="panel">
   <div id="coords"></div>
+  <div id="route-controls" hidden>
+    <div id="route-hint"></div>
+    <button id="route-undo" type="button">撤销上一个点</button>
+    <button id="route-reset" type="button">重新绘制</button>
+    <button id="route-save" type="button">保存路线</button>
+  </div>
   <button id="confirm-btn">确认位置</button>
   <div id="done-msg">已提交</div>
 </div>
@@ -137,6 +152,7 @@ body { font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif; }
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
+{{ROUTE_SCRIPT}}
 /* ---- App state ---- */
 var marker = null;
 var currentCoords = null;
@@ -156,6 +172,22 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 }).addTo(map);
 
+var routeLayers = L.layerGroup().addTo(map);
+initRouteEditor(function (points) {
+  routeLayers.clearLayers();
+  var line = points.slice();
+  if (routeLoop && line.length > 1) line.push(line[0]);
+  if (line.length > 1) L.polyline(line, { color: "#1677ff", weight: 4 }).addTo(routeLayers);
+  points.forEach(function (point, index) {
+    var pin = L.marker(point, { draggable: !routeSubmitted, title: "途经点 " + (index + 1) }).addTo(routeLayers);
+    pin.bindTooltip(String(index + 1), { permanent: true, direction: "top" });
+    pin.on("dragend", function () {
+      var pos = pin.getLatLng();
+      moveRoutePoint(index, pos.lat, pos.lng);
+    });
+  });
+}, function (point) { return point; });
+
 /* ---- Click to place marker ---- */
 map.on("click", function (e) {
   placeMarker(e.latlng.lat, e.latlng.lng);
@@ -163,6 +195,7 @@ map.on("click", function (e) {
 });
 
 function placeMarker(lat, lng) {
+  if (routeMode) { addRoutePoint(lat, lng); return; }
   if (marker) {
     marker.setLatLng([lat, lng]);
   } else {
@@ -268,8 +301,9 @@ document.addEventListener("click", function (e) {
 
 /* ---- Confirm ---- */
 confirmBtn.addEventListener("click", function () {
-  if (!currentCoords) return;
+  if (routeMode ? confirmBtn.disabled : !currentCoords) return;
   confirmBtn.disabled = true;
+  if (routeMode) { routeSubmitted = true; refreshRoute(); }
 
   var xhr = new XMLHttpRequest();
   xhr.open("POST", "http://127.0.0.1:{{PORT}}/confirm", true);
@@ -282,15 +316,17 @@ confirmBtn.addEventListener("click", function () {
         setTimeout(function () { window.close(); }, 600);
       } else {
         confirmBtn.disabled = false;
+        if (routeMode) { routeSubmitted = false; refreshRoute(); }
         alert("提交失败，请重试。");
       }
     }
   };
   xhr.onerror = function () {
     confirmBtn.disabled = false;
+    if (routeMode) { routeSubmitted = false; refreshRoute(); }
     alert("无法连接到本地服务，请检查终端。");
   };
-  xhr.send(JSON.stringify(currentCoords));
+  xhr.send(JSON.stringify(routeMode ? routePayload() : currentCoords));
 });
 </script>
 

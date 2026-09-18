@@ -214,6 +214,45 @@ $ export SIMLOCATION_DEFAULT_LON=<你的经度>
 
 如果你想改位置，可以设置 `SIMLOCATION_VAR_DIR`。
 
+## 运动轨迹
+
+在地图上依次选择途经点，以指定速度模拟移动：
+
+```bash
+simlocation route --speed 5
+```
+
+点击地图或搜索结果添加途经点，拖动标记调整位置。可以撤销、重新绘制，或点击「保存路线」下载 JSON；至少选择两个不同的位置后，点击「开始移动」。配置了高德 Key 时使用高德地图，坐标自动转换为 WGS-84。
+
+也可以直接运行路线文件。仓库提供了一个[示例路线](examples/route.json)：
+
+```bash
+# 在仓库根目录运行示例
+bin/simlocation route examples/route.json --speed 5
+
+# 读取 GPX，循环移动
+simlocation route walk.gpx --speed 8 --loop
+
+# 指定设备、查看进度、结束模拟定位
+simlocation route walk.gpx --device myphone --speed 5
+simlocation status
+simlocation clear --device myphone
+```
+
+`--speed` 的单位是 **km/h**，默认 `5`，支持大于 `0` 且不超过 `1000` 的数值。位置约每秒更新一次，按实际经过的时间计算距离。途经点之间直接连线，不会自动沿道路规划路线。
+
+默认走完后保持在终点，直到执行 `clear`。`--loop` 会增加从终点返回起点的线段，连续循环。再次运行 `route` 或 `set` 会替换同一设备的当前会话；`clear --all` 也可以结束运动轨迹。
+
+路线文件使用 WGS-84，JSON 中每个点的顺序是 `[纬度, 经度]`：
+
+```json
+{"points": [[1.2868, 103.8545], [1.2871, 103.8545], [1.2871, 103.8548]]}
+```
+
+GPX 支持单个连续的 `trkseg` 或 `rte`，按文件中的点顺序移动，速度由 `--speed` 决定；时间戳和海拔不参与回放。最多支持 10000 个点，文件不超过 4 MiB。
+
+只编辑和保存路线、不连接设备时，使用 `simlocation route --pick-only`。
+
 ## 多设备管理
 
 连接多台设备时，可以用别名来管理和指定目标设备。
@@ -365,7 +404,9 @@ $ export SIMLOCATION_AMAP_KEY=你的Key
 python3 -B -m unittest discover -s tests -v
 ```
 
-测试覆盖参数解析、USB 设备发现、目标设备 RSD 匹配、连接重试和后台进程生命周期。设备通信使用 mock；POSIX 平台另有真实本地子进程的超时回收检查。
+测试覆盖参数解析、USB 设备发现、目标设备 RSD 匹配、连接重试、后台进程生命周期，以及路线读取、插值、速度和循环。设备通信使用 mock；POSIX 平台另有真实本地子进程的超时回收检查。
+
+地图编辑逻辑可用 `node tests/test_map_routes.js` 验证，无需安装 npm 依赖。
 
 ## 致谢
 
