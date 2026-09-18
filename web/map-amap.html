@@ -317,7 +317,7 @@ confirmBtn.addEventListener("click", function () {
   confirmBtn.disabled = true;
 
   var xhr = new XMLHttpRequest();
-  xhr.open("POST", "/confirm", true);
+  xhr.open("POST", "/confirm" + window.location.search, true);
   xhr.setRequestHeader("Content-Type", "application/json");
   xhr.onreadystatechange = function () {
     if (xhr.readyState === 4) {

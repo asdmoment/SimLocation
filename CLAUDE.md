@@ -15,7 +15,7 @@ Two-layer entry point:
 
 pymobiledevice3 compatibility: imports are wrapped in `try/except` to support both v8.x (`DvtSecureSocketProxyService`) and v9.x (`DvtProvider`).
 
-Map picker: `simlocation map` starts a temporary HTTP server and opens a browser-based map. Two map providers are supported via separate HTML files:
+Map picker: `simlocation map` starts a temporary HTTP server and opens a browser-based map. `--listen`/`--port`/`--no-browser` (or the `--remote` shortcut, equal to `--listen 0.0.0.0 --no-browser`) let a headless host serve the picker to a phone on the same network; a non-loopback bind auto-enables a token that must appear as `?t=` on both `/` and `/confirm`, and the map HTML forwards `window.location.search` so the token survives the POST. Two map providers are supported via separate HTML files:
 - **`web/map-osm.html`** — Leaflet + OpenStreetMap (default, no key needed, WGS-84 native)
 - **`web/map-amap.html`** — Amap JS API (used when `SIMLOCATION_AMAP_KEY` is set, GCJ-02 → WGS-84 conversion in JS)
 
@@ -49,6 +49,9 @@ All prefixed with `SIMLOCATION_`:
 - `SIMLOCATION_PMD3` — override `pymobiledevice3` binary path
 - `SIMLOCATION_UDID` — force specific device UDID
 - `SIMLOCATION_AMAP_KEY` — Amap JS API key (optional; enables Amap map picker instead of OSM)
+- `SIMLOCATION_MAP_LISTEN` / `SIMLOCATION_MAP_PORT` — map picker bind address and port (defaults `127.0.0.1` and a random port). Binding a non-loopback address enables token auth automatically.
+- `SIMLOCATION_MAP_TOKEN` — fixed access token for the map picker; without it a one-shot token is generated per run. Only used when the bind address is non-loopback.
+- `SIMLOCATION_MAP_TIMEOUT_SECONDS` — how long the picker stays open (default 300)
 - `SIMLOCATION_START_TIMEOUT_SECONDS` — how long the foreground `set` waits for the background session to become ready (default 60; must stay above the 45 s tunnel request timeout)
 - `SIMLOCATION_TUNNELD_URL` — tunneld base URL (default `http://127.0.0.1:49151`)
 
