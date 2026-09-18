@@ -352,6 +352,38 @@ $ simlocation map
 $ simlocation map --pick-only
 ```
 
+### 远程选点（无头主机）
+
+当 SimLocation 跑在没有显示器的主机上（树莓派、小型 Linux 盒子、远程服务器），本机浏览器打不开，需要让**另一台设备**来选点：
+
+```bash
+$ simlocation map --remote
+```
+
+`--remote` 等价于 `--listen 0.0.0.0 --no-browser`。启动后会打印所有可用地址，用手机浏览器打开其中任意一个即可：
+
+```
+[*] 请在手机浏览器打开下面任意一个地址，选点后点「确认位置」：
+      http://172.20.10.3:8765/?t=GKd5iQlBU39cEW7Q-JgcLw
+[*] 该地址包含一次性访问令牌，选点完成或超时后立即失效。
+```
+
+监听非 loopback 地址时会**自动生成一次性访问令牌**并附在 URL 上。没有令牌的请求一律返回 403，同网络的其他设备无法在你不知情的情况下改动定位。令牌随进程存在，选点完成或超时后即失效。
+
+可以固定监听地址和端口，便于配合 systemd 或书签：
+
+```bash
+$ simlocation map --listen 0.0.0.0 --port 8765 --no-browser
+```
+
+远程选点通常需要更长的操作时间（SSH 进去启动、再掏出手机打开浏览器），默认的 300 秒可以调整：
+
+```bash
+$ export SIMLOCATION_MAP_TIMEOUT_SECONDS=900
+```
+
+> 完整的随身部署方案（树莓派 + USB 连接 + 手机热点）见 [PORTABLE-HOST.md](PORTABLE-HOST.md)。
+
 ### 配置高德 Key（可选）
 
 如果你需要更精细的中国地图体验，可以配置一个免费的高德 JS API Key：

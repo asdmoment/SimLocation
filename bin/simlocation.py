@@ -5,9 +5,11 @@ import subprocess
 import sys
 import argparse
 import asyncio
+import ipaddress
 import json
 import os
 import re
+import secrets
 import signal
 import shutil
 import socket
@@ -18,6 +20,7 @@ import webbrowser
 from contextlib import redirect_stderr
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlsplit, parse_qs
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from pymobiledevice3.remote.remote_service_discovery import (
@@ -1015,14 +1018,97 @@ AMAP_KEY_HINT = """\
 
 MAP_AMAP_HTML_PATH = PROJECT_DIR / "web" / "map-amap.html"
 MAP_OSM_HTML_PATH = PROJECT_DIR / "web" / "map-osm.html"
-MAP_SERVER_TIMEOUT_SECONDS = 300
 MAP_MAX_BODY_BYTES = 4096
+MAP_DEFAULT_LISTEN = "127.0.0.1"
+
+
+def get_map_timeout_seconds():
+    """How long the picker stays open. Remote use needs more than local use."""
+    raw = os.environ.get("SIMLOCATION_MAP_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return 300
+
+
+MAP_SERVER_TIMEOUT_SECONDS = get_map_timeout_seconds()
+
+
+def is_loopback_host(host):
+    """Loopback binds are private; anything else is reachable by other hosts.
+
+    "" is deliberately not loopback: Python binds it to every interface.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def resolve_map_listen_host(listen_host=None):
+    """Explicit value wins over SIMLOCATION_MAP_LISTEN; blanks stay private.
+
+    A blank --listen or variable would otherwise reach HTTPServer as "" and
+    silently bind every interface without a token.
+    """
+    if listen_host is None:
+        listen_host = os.environ.get("SIMLOCATION_MAP_LISTEN", "")
+    return listen_host.strip() or MAP_DEFAULT_LISTEN
+
+
+def guess_reachable_hosts():
+    """Best-effort list of addresses a phone on the same network could use."""
+    hosts = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addr = info[4][0]
+            if addr not in hosts and not addr.startswith("127."):
+                hosts.append(addr)
+    except (socket.gaierror, OSError):
+        pass
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.settimeout(0.2)
+        try:
+            probe.connect(("192.0.2.1", 9))
+            addr = probe.getsockname()[0]
+            if addr not in hosts and not addr.startswith("127."):
+                hosts.append(addr)
+        finally:
+            probe.close()
+    except OSError:
+        pass
+    return hosts
 
 
 class _MapRequestHandler(BaseHTTPRequestHandler):
+    def _route(self):
+        parts = urlsplit(self.path)
+        return parts.path, parse_qs(parts.query)
+
+    def _authorized(self, query):
+        """No token means loopback-only; otherwise the URL must carry it."""
+        token = getattr(self.server, "access_token", None)
+        if not token:
+            return True
+        supplied = (query.get("t") or [""])[0]
+        # compare_digest() rejects non-ASCII str with TypeError, which would
+        # turn a stray "?t=中文" into a traceback and a dropped connection.
+        return secrets.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))
+
     def do_GET(self):
-        if self.path != "/":
+        path, query = self._route()
+        if path != "/":
             self.send_error(404)
+            return
+        if not self._authorized(query):
+            self.send_error(403)
             return
         html = self.server.map_html
         self.send_response(200)
@@ -1032,8 +1118,12 @@ class _MapRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(html)
 
     def do_POST(self):
-        if self.path != "/confirm":
+        path, query = self._route()
+        if path != "/confirm":
             self.send_error(404)
+            return
+        if not self._authorized(query):
+            self.send_error(403)
             return
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -1109,7 +1199,7 @@ def _open_app_window(url):
     webbrowser.open(url)
 
 
-def run_map_picker(amap_key=None):
+def run_map_picker(amap_key=None, listen_host=None, listen_port=None, open_browser=True):
     if amap_key:
         html_path = MAP_AMAP_HTML_PATH
         provider = "高德地图"
@@ -1122,18 +1212,60 @@ def run_map_picker(amap_key=None):
         sys.exit(1)
     template = html_path.read_text(encoding="utf-8")
 
-    server = HTTPServer(("127.0.0.1", 0), _MapRequestHandler)
+    listen_host = resolve_map_listen_host(listen_host)
+    if listen_port is None:
+        raw_port = os.environ.get("SIMLOCATION_MAP_PORT", "").strip()
+        try:
+            listen_port = int(raw_port) if raw_port else 0
+        except ValueError:
+            listen_port = 0
+
+    exposed = not is_loopback_host(listen_host)
+
+    try:
+        server = HTTPServer((listen_host, listen_port), _MapRequestHandler)
+    except OSError as exc:
+        print(f"[!] 无法在 {listen_host}:{listen_port} 启动地图服务: {exc}")
+        sys.exit(1)
     port = server.server_address[1]
+
     html_text = template
     if amap_key:
         html_text = html_text.replace("{{AMAP_KEY}}", amap_key)
     server.map_html = html_text.encode("utf-8")
     server.picked_coords = None
+    # A non-loopback bind is reachable by every host on the network, so the
+    # URL itself becomes the credential. A fixed token can be supplied so an
+    # always-on host keeps a bookmarkable URL across restarts.
+    if exposed:
+        server.access_token = (
+            os.environ.get("SIMLOCATION_MAP_TOKEN", "").strip() or secrets.token_urlsafe(16)
+        )
+    else:
+        server.access_token = None
 
-    url = f"http://127.0.0.1:{port}/"
-    print(f"[*] 地图选点服务已启动 ({provider}): {url}")
-    print("[*] 正在打开浏览器，请在地图上选择位置后点击「确认」。")
-    _open_app_window(url)
+    query = f"?t={server.access_token}" if server.access_token else ""
+    print(f"[*] 地图选点服务已启动 ({provider})，{MAP_SERVER_TIMEOUT_SECONDS} 秒后超时。")
+    if exposed:
+        display_hosts = guess_reachable_hosts() if listen_host == "0.0.0.0" else [listen_host]
+        if not display_hosts:
+            display_hosts = [listen_host]
+        print("[*] 请在手机浏览器打开下面任意一个地址，选点后点「确认位置」：")
+        for host in display_hosts:
+            print(f"      http://{host}:{port}/{query}")
+        if os.environ.get("SIMLOCATION_MAP_TOKEN", "").strip():
+            print("[*] 该地址使用 SIMLOCATION_MAP_TOKEN 指定的固定令牌，可加入书签。")
+        else:
+            print("[*] 该地址包含一次性访问令牌，选点完成或超时后立即失效。")
+        # Remote use almost always redirects stdout (systemd, nohup, ssh pipe),
+        # where block buffering would hide the URL until the server exits.
+        sys.stdout.flush()
+    else:
+        url = f"http://{listen_host}:{port}/"
+        print(f"[*] {url}")
+        if open_browser:
+            print("[*] 正在打开浏览器，请在地图上选择位置后点击「确认」。")
+            _open_app_window(url)
 
     timer = threading.Timer(MAP_SERVER_TIMEOUT_SECONDS, server.shutdown)
     timer.daemon = True
@@ -1231,6 +1363,28 @@ def build_parser():
         "--pick-only",
         action="store_true",
         help="仅选点并输出坐标，不自动设置定位",
+    )
+    sub_map.add_argument(
+        "--listen",
+        default=None,
+        metavar="HOST",
+        help="地图服务监听地址，默认 127.0.0.1。设为 0.0.0.0 可让同网络的手机访问（会自动启用一次性令牌）",
+    )
+    sub_map.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="地图服务端口，默认随机。远程使用时建议固定",
+    )
+    sub_map.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="不尝试打开本机浏览器，只打印地址（无头主机上使用）",
+    )
+    sub_map.add_argument(
+        "--remote",
+        action="store_true",
+        help="远程模式快捷方式，等价于 --listen 0.0.0.0 --no-browser",
     )
 
     # simlocation status
@@ -1748,7 +1902,17 @@ if __name__ == "__main__":
         amap_key = os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() or None
         if not amap_key:
             print(AMAP_KEY_HINT)
-        coords = run_map_picker(amap_key)
+        listen_host = getattr(args, "listen", None)
+        open_browser = not getattr(args, "no_browser", False)
+        if getattr(args, "remote", False):
+            listen_host = listen_host or "0.0.0.0"
+            open_browser = False
+        coords = run_map_picker(
+            amap_key,
+            listen_host=listen_host,
+            listen_port=getattr(args, "port", None),
+            open_browser=open_browser,
+        )
         if coords is None:
             print("[-] 未选择坐标（超时或关闭了浏览器）。")
             sys.exit(1)
