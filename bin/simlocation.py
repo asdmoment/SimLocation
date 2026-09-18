@@ -7,17 +7,21 @@ import argparse
 import asyncio
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
 import signal
 import shutil
 import socket
+import tempfile
 import time
 import threading
 import unicodedata
 import webbrowser
-from contextlib import redirect_stderr
+import xml.etree.ElementTree as ET
+from bisect import bisect_right
+from contextlib import redirect_stderr, suppress
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlsplit, parse_qs
@@ -29,6 +33,14 @@ from pymobiledevice3.remote.remote_service_discovery import (
 from pymobiledevice3.services.dvt.instruments.location_simulation import (
     LocationSimulation,
 )
+
+try:
+    # defusedxml 是 pymobiledevice3 的硬依赖，能跑本 CLI 的环境里必然有它。
+    # 标准库 ElementTree 不解析外部实体（XXE 打不通），但会展开内部实体，
+    # 1 KB 的 GPX 可以膨胀成几百 MB。
+    from defusedxml.ElementTree import fromstring as xml_fromstring
+except ImportError:  # pragma: no cover - 只有装坏了的环境会走到这里
+    xml_fromstring = None
 
 try:
     # pymobiledevice3 >= 9.x: DvtSecureSocketProxyService 被重构为 DvtProvider
@@ -73,6 +85,14 @@ RSD_CONNECT_TIMEOUT_SECONDS = 2
 DEFAULT_LOG_PATH = RUNTIME_DIR / "simlocation.log"
 HOLD_START_TIMEOUT_SECONDS = 60
 HOLD_POLL_INTERVAL_SECONDS = 0.25
+# How often a moving session pushes a new coordinate. Also the resolution of
+# the progress shown by `status`, so it is deliberately human-scaled rather
+# than as fast as the DVT channel would allow.
+ROUTE_UPDATE_INTERVAL_SECONDS = 1.0
+MAX_ROUTE_POINTS = 10000
+MAX_ROUTE_BYTES = 4 * 1024 * 1024
+EARTH_RADIUS_METERS = 6371008.8
+DEFAULT_ROUTE_SPEED_KMH = 5.0
 
 DEFAULT_DEVICES_PATH = RUNTIME_DIR / "devices.json"
 
@@ -121,16 +141,146 @@ def looks_like_udid(value):
 
 def validate_coordinates(lat, lon):
     """Parse and range-check a lat/lon pair. Raises ValueError with a Chinese message."""
+    # bool is an int subclass, so JSON `true` would otherwise sail through as 1.0.
+    if isinstance(lat, bool) or isinstance(lon, bool):
+        raise ValueError(f"坐标必须是数字，收到: {lat} {lon}")
     try:
         lat_value = float(lat)
         lon_value = float(lon)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(f"坐标必须是数字，收到: {lat} {lon}") from None
+    if not math.isfinite(lat_value) or not math.isfinite(lon_value):
+        raise ValueError(f"坐标必须是有限数字，收到: {lat} {lon}")
     if not (-90.0 <= lat_value <= 90.0):
         raise ValueError(f"纬度必须在 -90 到 90 之间，收到: {lat}")
     if not (-180.0 <= lon_value <= 180.0):
         raise ValueError(f"经度必须在 -180 到 180 之间，收到: {lon}")
     return lat_value, lon_value
+
+
+def route_distance(start, end):
+    """Great-circle distance in meters between two (lat, lon) pairs."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (*start, *end))
+    a = (
+        math.sin((lat2 - lat1) / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    )
+    return 2 * EARTH_RADIUS_METERS * math.asin(math.sqrt(min(1.0, max(0.0, a))))
+
+
+class Route:
+    """A polyline measured in meters, interpolated along great-circle segments.
+
+    Waypoints are kept in input order with consecutive duplicates dropped, so a
+    double-click on the map picker does not create a zero-length segment that
+    would divide by zero during interpolation.
+    """
+
+    def __init__(self, points, loop=False):
+        if not isinstance(points, (list, tuple)) or not 2 <= len(points) <= MAX_ROUTE_POINTS:
+            raise ValueError(f"路线需要 2 到 {MAX_ROUTE_POINTS} 个坐标点。")
+        self.points = []
+        for index, point in enumerate(points, 1):
+            if isinstance(point, (str, bytes)) or not isinstance(point, (list, tuple)):
+                raise ValueError(f"第 {index} 个点应为 [纬度, 经度]。")
+            if len(point) != 2:
+                raise ValueError(f"第 {index} 个点应为 [纬度, 经度]。")
+            point = validate_coordinates(*point)
+            if not self.points or route_distance(self.points[-1], point) > 0.001:
+                self.points.append(point)
+        if len(self.points) < 2:
+            raise ValueError("路线需要至少两个不同的位置。")
+        if loop:
+            if route_distance(self.points[-1], self.points[0]) > 0.001:
+                self.points.append(self.points[0])
+            else:
+                self.points[-1] = self.points[0]
+        self.loop = loop
+        self.cumulative = [0.0]
+        for start, end in zip(self.points, self.points[1:]):
+            distance = route_distance(start, end)
+            # Antipodal endpoints have infinitely many great circles through
+            # them, so there is no single path to interpolate along.
+            if distance / EARTH_RADIUS_METERS >= math.pi - 1e-6:
+                raise ValueError("路线包含地球正对两端的点，请增加中间途经点。")
+            self.cumulative.append(self.cumulative[-1] + distance)
+        self.total_m = self.cumulative[-1]
+
+    def waypoints(self):
+        """Waypoints as stored on disk: the closing point of a loop is implied."""
+        return self.points[:-1] if self.loop else self.points
+
+    def position(self, distance_m):
+        """Coordinates reached after travelling distance_m along the polyline."""
+        if distance_m <= 0:
+            return self.points[0]
+        if distance_m >= self.total_m:
+            return self.points[-1]
+        index = bisect_right(self.cumulative, distance_m) - 1
+        segment_m = self.cumulative[index + 1] - self.cumulative[index]
+        fraction = (distance_m - self.cumulative[index]) / segment_m
+        # Spherical linear interpolation: walking a straight line in lat/lon
+        # drifts off the great circle and distorts badly at high latitudes.
+        angle = segment_m / EARTH_RADIUS_METERS
+        weights = (
+            math.sin((1 - fraction) * angle) / math.sin(angle),
+            math.sin(fraction * angle) / math.sin(angle),
+        )
+        vectors = []
+        for lat, lon in self.points[index:index + 2]:
+            lat, lon = math.radians(lat), math.radians(lon)
+            vectors.append(
+                (math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat))
+            )
+        x, y, z = (
+            sum(weight * vector[axis] for weight, vector in zip(weights, vectors))
+            for axis in range(3)
+        )
+        return math.degrees(math.atan2(z, math.hypot(x, y))), math.degrees(math.atan2(y, x))
+
+
+def parse_gpx_points(data):
+    """Extract the single track segment or route from a GPX document."""
+    if xml_fromstring is not None:
+        root = xml_fromstring(data)
+    else:
+        # No defusedxml: refuse any DTD rather than hand expat an entity bomb.
+        if b"<!DOCTYPE" in data[:4096]:
+            raise ValueError("GPX 不支持 DOCTYPE 声明。")
+        root = ET.fromstring(data)
+    segments = []
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag in ("trkseg", "rte"):
+            point_tag = "trkpt" if tag == "trkseg" else "rtept"
+            points = [
+                (point.get("lat"), point.get("lon"))
+                for point in element
+                if point.tag.rsplit("}", 1)[-1] == point_tag
+            ]
+            if points:
+                segments.append(points)
+    if len(segments) != 1:
+        raise ValueError("GPX 需要且只能包含一条连续的 track segment 或 route。")
+    return segments[0]
+
+
+def load_route(path, loop=False):
+    """Build a Route from a JSON waypoint list or a single-segment GPX file."""
+    path = Path(path).expanduser()
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(MAX_ROUTE_BYTES + 1)
+        if len(data) > MAX_ROUTE_BYTES:
+            raise ValueError(f"路线文件不能超过 {MAX_ROUTE_BYTES // (1024 * 1024)} MiB。")
+        if path.suffix.lower() == ".gpx":
+            points = parse_gpx_points(data)
+        else:
+            decoded = json.loads(data)
+            points = decoded.get("points") if isinstance(decoded, dict) else decoded
+        return Route(points, loop=loop)
+    except (OSError, ValueError, ET.ParseError, RecursionError) as exc:
+        raise ValueError(f"无法读取路线 {path.name}: {exc}") from exc
 
 
 def pid_path_for(udid):
@@ -152,9 +302,17 @@ def log_message(message, log_path=None):
 
 def write_state(state_path, payload):
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    # A moving session rewrites this once a second while `status` reads it, so
+    # a plain write_text() would eventually be caught mid-flush and parsed as
+    # truncated JSON. Rename is atomic within the directory.
+    temporary = state_path.with_name(f"{state_path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary.replace(state_path)
+    finally:
+        remove_file_if_exists(temporary)
 
 
 def read_state(state_path):
@@ -824,8 +982,46 @@ async def clear_held_location(simulation, state_path):
     write_state(state_path, state)
 
 
+async def play_route(
+    simulation, route, speed_kmh, loop_route, stop_event, state, state_path,
+    clock=time.monotonic,
+):
+    """Walk the route at speed_kmh, pushing a coordinate every tick.
+
+    Position is derived from elapsed wall time rather than accumulated per-tick
+    steps, so a slow DVT round-trip makes the next update jump ahead instead of
+    letting the simulated device fall progressively behind schedule.
+    """
+    started = clock()
+    while not stop_event.is_set():
+        traveled_m = (clock() - started) * speed_kmh / 3.6
+        distance_m = traveled_m % route.total_m if loop_route else min(traveled_m, route.total_m)
+        lat, lon = route.position(distance_m)
+        await simulation.set(lat, lon)
+        completed = not loop_route and traveled_m >= route.total_m
+        state.update(
+            # ~0.1 m of precision: the state file is read by humans and by
+            # `status`, and full float repr makes the device table unreadable.
+            lat=f"{lat:.6f}",
+            lon=f"{lon:.6f}",
+            route_phase="completed" if completed else "moving",
+            distance_m=distance_m,
+            progress=distance_m / route.total_m,
+            lap=int(traveled_m // route.total_m) + 1 if loop_route else 1,
+        )
+        write_state(state_path, state)
+        if completed:
+            # Hold the endpoint rather than dropping the simulation, so the
+            # device does not snap back to its real location on arrival.
+            await stop_event.wait()
+            return
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=ROUTE_UPDATE_INTERVAL_SECONDS)
+
+
 async def _hold_dvt_location_session(
-    rsd_pair, lat, lon, state_path, log_path=None, stop_event=None
+    rsd_pair, lat, lon, state_path, log_path=None, stop_event=None,
+    *, route=None, speed_kmh=DEFAULT_ROUTE_SPEED_KMH, loop_route=False,
 ):
     if stop_event is None:
         stop_event = asyncio.Event()
@@ -847,27 +1043,58 @@ async def _hold_dvt_location_session(
                     log_message("[*] 启动期间收到停止请求，未设置定位。", log_path)
                     return
                 await simulation.set(float(lat), float(lon))
-                write_state(
-                    state_path,
-                    {
-                        "status": "ready",
-                        "pid": os.getpid(),
-                        "rsd_address": rsd_pair[0],
-                        "rsd_port": rsd_pair[1],
-                        "lat": str(lat),
-                        "lon": str(lon),
-                        "started_at": datetime.now().isoformat(timespec="seconds"),
-                    },
-                )
-                log_message(
-                    "[+] 后台定位会话已建立，将持续保持当前位置直到执行 clear。", log_path
-                )
-                await stop_event.wait()
+                state = {
+                    "status": "ready",
+                    "pid": os.getpid(),
+                    "rsd_address": rsd_pair[0],
+                    "rsd_port": rsd_pair[1],
+                    "lat": str(lat),
+                    "lon": str(lon),
+                    "started_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                if route:
+                    state.update(
+                        mode="route",
+                        route_phase="moving",
+                        speed_kmh=speed_kmh,
+                        loop=loop_route,
+                        total_m=route.total_m,
+                        distance_m=0.0,
+                        progress=0.0,
+                        lap=1,
+                    )
+                write_state(state_path, state)
+                try:
+                    if route:
+                        log_message(
+                            f"[+] 后台运动轨迹会话已建立，{route.total_m:.0f} m / "
+                            f"{speed_kmh:g} km/h，直到执行 clear。",
+                            log_path,
+                        )
+                        await play_route(
+                            simulation, route, speed_kmh, loop_route,
+                            stop_event, state, state_path,
+                        )
+                    else:
+                        log_message(
+                            "[+] 后台定位会话已建立，将持续保持当前位置直到执行 clear。",
+                            log_path,
+                        )
+                        await stop_event.wait()
+                except BaseException:
+                    # A moving session can fail mid-flight (device unplugged,
+                    # DVT error). Dropping out without clearing would strand the
+                    # device at a fake location, so try once before propagating.
+                    # Best-effort only: the same fault usually breaks clear too.
+                    with suppress(Exception):
+                        await simulation.clear()
+                    raise
                 await clear_held_location(simulation, state_path)
 
 
 def run_hold_session(
-    lat, lon, pmd3_bin, connection_mode, pid_path, state_path, log_path=None
+    lat, lon, pmd3_bin, connection_mode, pid_path, state_path, log_path=None,
+    *, route=None, speed_kmh=DEFAULT_ROUTE_SPEED_KMH, loop_route=False,
 ):
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -890,7 +1117,10 @@ def run_hold_session(
             raise RuntimeError("未找到有效的 RSD 隧道")
 
         asyncio.run(
-            _hold_dvt_location_session(rsd_pair, lat, lon, state_path, log_path)
+            _hold_dvt_location_session(
+                rsd_pair, lat, lon, state_path, log_path,
+                route=route, speed_kmh=speed_kmh, loop_route=loop_route,
+            )
         )
         state = read_state(state_path) or {}
         state["status"] = "stopped"
@@ -914,7 +1144,8 @@ def run_hold_session(
 
 
 def start_hold_session(
-    lat, lon, pmd3_bin, connection_mode, udid, log_path=None
+    lat, lon, pmd3_bin, connection_mode, udid, log_path=None,
+    *, route_file=None, speed_kmh=DEFAULT_ROUTE_SPEED_KMH, loop_route=False,
 ):
     try:
         timeout_seconds = get_hold_start_timeout_seconds()
@@ -939,7 +1170,12 @@ def start_hold_session(
     ]
     if log_path:
         cmd.extend(["--debug", "--log-file", str(log_path)])
-    cmd.extend(["set", str(lat), str(lon)])
+    if route_file:
+        cmd.extend(["route", str(route_file), "--speed", repr(float(speed_kmh))])
+        if loop_route:
+            cmd.append("--loop")
+    else:
+        cmd.extend(["set", str(lat), str(lon)])
     child_env = os.environ.copy()
     child_env["SIMLOCATION_UDID"] = udid
 
@@ -974,6 +1210,42 @@ def auto_set_location(
         return
     log_message("[-] 后台定位会话启动失败。", log_path)
     sys.exit(1)
+
+
+def auto_set_route(
+    route, speed_kmh, loop_route, pmd3_bin, connection_mode="auto", log_path=None,
+    udid=None, device_flag=None,
+):
+    if not udid:
+        udid = resolve_device_udid(pmd3_bin, log_path, device_flag=device_flag)
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    # Hand the worker an immutable snapshot: the source file may be edited or
+    # deleted while the session runs, and a route drawn on the map has no file
+    # at all. The worker loads it during argument parsing, before it reports
+    # ready, so the snapshot can be removed as soon as start_hold_session returns.
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", prefix="route-", dir=RUNTIME_DIR,
+        encoding="utf-8", delete=False,
+    ) as handle:
+        snapshot = Path(handle.name)
+        json.dump({"points": route.waypoints()}, handle)
+    try:
+        message = (
+            f"[*] 正在启动运动轨迹，连接模式: {connection_mode}，设备: {udid}。\n"
+            f"[*] 全程 {route.total_m:.0f} m，{speed_kmh:g} km/h，"
+            f"{'循环移动' if loop_route else '到终点后保持定位'}。"
+        )
+        log_message(message, log_path)
+        if start_hold_session(
+            *route.points[0], pmd3_bin, connection_mode, udid, log_path,
+            route_file=snapshot, speed_kmh=speed_kmh, loop_route=loop_route,
+        ):
+            log_message("[+] 运动轨迹已启动，用 status 查看进度，clear 结束。", log_path)
+            return
+        log_message("[-] 运动轨迹启动失败。", log_path)
+        sys.exit(1)
+    finally:
+        remove_file_if_exists(snapshot)
 
 
 def clear_location(
@@ -1027,6 +1299,7 @@ AMAP_KEY_HINT = """\
 MAP_AMAP_HTML_PATH = PROJECT_DIR / "web" / "map-amap.html"
 MAP_OSM_HTML_PATH = PROJECT_DIR / "web" / "map-osm.html"
 MAP_MAX_BODY_BYTES = 4096
+MAP_ROUTE_SCRIPT_PATH = PROJECT_DIR / "web" / "map-route.js"
 MAP_DEFAULT_LISTEN = "127.0.0.1"
 
 
@@ -1141,17 +1414,27 @@ class _MapRequestHandler(BaseHTTPRequestHandler):
         if length <= 0:
             self.send_error(400)
             return
-        if length > MAP_MAX_BODY_BYTES:
+        # A single coordinate is a few dozen bytes; a 10k-waypoint route is
+        # hundreds of KB, so the cap has to follow the mode the picker runs in.
+        route_mode = getattr(self.server, "route_mode", False)
+        max_bytes = MAX_ROUTE_BYTES if route_mode else MAP_MAX_BODY_BYTES
+        if length > max_bytes:
             self.send_error(413)
             return
         body = self.rfile.read(length)
         try:
             data = json.loads(body)
-            lat, lon = validate_coordinates(data["lat"], data["lon"])
+            if route_mode:
+                # Build the Route here: rejecting a bad polyline with 400 lets
+                # the browser keep the drawing, where shutting the picker down
+                # first would lose it.
+                picked = Route(data["points"], loop=getattr(self.server, "loop_route", False))
+            else:
+                picked = validate_coordinates(data["lat"], data["lon"])
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             self.send_error(400)
             return
-        self.server.picked_coords = (lat, lon)
+        self.server.picked_coords = picked
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         resp = b'{"ok":true}'
@@ -1207,7 +1490,11 @@ def _open_app_window(url):
     webbrowser.open(url)
 
 
-def run_map_picker(amap_key=None, listen_host=None, listen_port=None, open_browser=True):
+def run_map_picker(
+    amap_key=None, listen_host=None, listen_port=None, open_browser=True,
+    *, route_mode=False, speed_kmh=DEFAULT_ROUTE_SPEED_KMH, loop_route=False,
+    pick_only=False,
+):
     if amap_key:
         html_path = MAP_AMAP_HTML_PATH
         provider = "高德地图"
@@ -1215,9 +1502,10 @@ def run_map_picker(amap_key=None, listen_host=None, listen_port=None, open_brows
         html_path = MAP_OSM_HTML_PATH
         provider = "OpenStreetMap"
 
-    if not html_path.is_file():
-        print(f"[!] 地图页面文件不存在: {html_path}")
-        sys.exit(1)
+    for required in (html_path, MAP_ROUTE_SCRIPT_PATH):
+        if not required.is_file():
+            print(f"[!] 地图页面文件不存在: {required}")
+            sys.exit(1)
     template = html_path.read_text(encoding="utf-8")
 
     listen_host = resolve_map_listen_host(listen_host)
@@ -1238,10 +1526,25 @@ def run_map_picker(amap_key=None, listen_host=None, listen_port=None, open_brows
     port = server.server_address[1]
 
     html_text = template
+    # The route editor is shared by both providers, so it lives in its own file
+    # and is inlined here rather than served as a second endpoint.
+    html_text = html_text.replace(
+        "{{ROUTE_SCRIPT}}", MAP_ROUTE_SCRIPT_PATH.read_text(encoding="utf-8")
+    )
+    for placeholder, value in (
+        ("{{ROUTE_MODE}}", "true" if route_mode else "false"),
+        ("{{ROUTE_LOOP}}", "true" if loop_route else "false"),
+        ("{{PICK_ONLY}}", "true" if pick_only else "false"),
+        ("{{ROUTE_SPEED}}", repr(float(speed_kmh))),
+        ("{{MAX_ROUTE_POINTS}}", str(MAX_ROUTE_POINTS)),
+    ):
+        html_text = html_text.replace(placeholder, value)
     if amap_key:
         html_text = html_text.replace("{{AMAP_KEY}}", amap_key)
     server.map_html = html_text.encode("utf-8")
     server.picked_coords = None
+    server.route_mode = route_mode
+    server.loop_route = loop_route
     # A non-loopback bind is reachable by every host on the network, so the
     # URL itself becomes the credential. A fixed token can be supplied so an
     # always-on host keeps a bookmarkable URL across restarts.
@@ -1258,7 +1561,8 @@ def run_map_picker(amap_key=None, listen_host=None, listen_port=None, open_brows
         display_hosts = guess_reachable_hosts() if listen_host == "0.0.0.0" else [listen_host]
         if not display_hosts:
             display_hosts = [listen_host]
-        print("[*] 请在手机浏览器打开下面任意一个地址，选点后点「确认位置」：")
+        action = "依次添加途经点后确认路线" if route_mode else "选点后点「确认位置」"
+        print(f"[*] 请在手机浏览器打开下面任意一个地址，{action}：")
         for host in display_hosts:
             print(f"      http://{host}:{port}/{query}")
         if os.environ.get("SIMLOCATION_MAP_TOKEN", "").strip():
@@ -1272,7 +1576,10 @@ def run_map_picker(amap_key=None, listen_host=None, listen_port=None, open_brows
         url = f"http://{listen_host}:{port}/"
         print(f"[*] {url}")
         if open_browser:
-            print("[*] 正在打开浏览器，请在地图上选择位置后点击「确认」。")
+            print(
+                "[*] 正在打开浏览器，请在地图上依次添加途经点后确认路线。" if route_mode
+                else "[*] 正在打开浏览器，请在地图上选择位置后点击「确认」。"
+            )
             _open_app_window(url)
 
     timer = threading.Timer(MAP_SERVER_TIMEOUT_SECONDS, server.shutdown)
@@ -1322,6 +1629,42 @@ def add_common_options(parser, for_subcommand=False):
     )
 
 
+def add_map_server_options(parser):
+    """Bind options for anything that serves the browser map picker."""
+    parser.add_argument(
+        "--listen",
+        default=None,
+        metavar="HOST",
+        help="地图服务监听地址，默认 127.0.0.1。设为 0.0.0.0 可让同网络的手机访问（会自动启用一次性令牌）",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="地图服务端口，默认随机。远程使用时建议固定",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="不尝试打开本机浏览器，只打印地址（无头主机上使用）",
+    )
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="远程模式快捷方式，等价于 --listen 0.0.0.0 --no-browser",
+    )
+
+
+def map_bind_from_args(args):
+    """Resolve (listen_host, open_browser) from the shared map server options."""
+    listen_host = getattr(args, "listen", None)
+    open_browser = not getattr(args, "no_browser", False)
+    if getattr(args, "remote", False):
+        listen_host = listen_host or "0.0.0.0"
+        open_browser = False
+    return listen_host, open_browser
+
+
 def read_project_version():
     try:
         return (PROJECT_DIR / "VERSION").read_text(encoding="utf-8").strip()
@@ -1359,6 +1702,25 @@ def build_parser():
     sub_set.add_argument("lat", help="纬度")
     sub_set.add_argument("lon", help="经度")
 
+    # simlocation route [file] [--speed N] [--loop]
+    sub_route = subparsers.add_parser("route", help="沿路线模拟移动")
+    add_common_options(sub_route, for_subcommand=True)
+    sub_route.add_argument(
+        "file", nargs="?", help="JSON 或 GPX 路线文件；省略则打开地图绘制路线"
+    )
+    sub_route.add_argument(
+        "--speed", type=float, default=DEFAULT_ROUTE_SPEED_KMH,
+        help=f"移动速度，单位 km/h，默认 {DEFAULT_ROUTE_SPEED_KMH:g}（约等于步行）",
+    )
+    sub_route.add_argument(
+        "--loop", action="store_true", help="到终点后连回起点，循环移动",
+    )
+    sub_route.add_argument(
+        "--pick-only", action="store_true",
+        help="仅在地图上绘制并输出路线 JSON，不设置定位",
+    )
+    add_map_server_options(sub_route)
+
     # simlocation clear
     sub_clear = subparsers.add_parser("clear", help="清除虚拟定位，恢复真实位置")
     add_common_options(sub_clear, for_subcommand=True)
@@ -1372,28 +1734,7 @@ def build_parser():
         action="store_true",
         help="仅选点并输出坐标，不自动设置定位",
     )
-    sub_map.add_argument(
-        "--listen",
-        default=None,
-        metavar="HOST",
-        help="地图服务监听地址，默认 127.0.0.1。设为 0.0.0.0 可让同网络的手机访问（会自动启用一次性令牌）",
-    )
-    sub_map.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="地图服务端口，默认随机。远程使用时建议固定",
-    )
-    sub_map.add_argument(
-        "--no-browser",
-        action="store_true",
-        help="不尝试打开本机浏览器，只打印地址（无头主机上使用）",
-    )
-    sub_map.add_argument(
-        "--remote",
-        action="store_true",
-        help="远程模式快捷方式，等价于 --listen 0.0.0.0 --no-browser",
-    )
+    add_map_server_options(sub_map)
 
     # simlocation status
     sub_status = subparsers.add_parser("status", help="查看所有设备定位状态")
@@ -1511,6 +1852,23 @@ def parse_args(argv=None):
         except ValueError as exc:
             parser.error(str(exc))
 
+    if args.command == "route":
+        if not math.isfinite(args.speed) or not 0 < args.speed <= 1000:
+            parser.error("--speed 必须大于 0 且不超过 1000 km/h。")
+        if args.pick_only and args.file:
+            parser.error("--pick-only 只用于在地图上绘制路线，不能同时给出路线文件。")
+        if args._hold_session and not args.file:
+            parser.error("后台运动轨迹会话需要路线文件。")
+        # Load before any device work so a malformed file fails immediately
+        # instead of after a tunnel has been negotiated.
+        try:
+            args.route = load_route(args.file, loop=args.loop) if args.file else None
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    if args._hold_session and args.command not in ("set", "route"):
+        parser.error("_hold-session 只能用于 set 或 route 命令。")
+
     return args
 
 
@@ -1545,9 +1903,19 @@ def describe_session_state(state):
         lat = state.get("lat", "?")
         lon = state.get("lon", "?")
         pid = state.get("pid")
-        if is_process_alive(pid):
-            return f"ready ({lat}, {lon})"
-        return f"stale (进程 {pid} 已退出，定位可能仍在生效，请执行 clear)"
+        if not is_process_alive(pid):
+            return f"stale (进程 {pid} 已退出，定位可能仍在生效，请执行 clear)"
+        if state.get("mode") == "route":
+            if state.get("route_phase") == "completed":
+                return f"已到终点，保持定位 ({lat}, {lon})"
+            moving = (
+                f"移动中 {state.get('progress', 0):.0%} "
+                f"{state.get('speed_kmh', 0):g} km/h ({lat}, {lon})"
+            )
+            if state.get("loop"):
+                moving += f" 第 {state.get('lap', 1)} 圈"
+            return moving
+        return f"ready ({lat}, {lon})"
     if status == "starting":
         return "starting"
     if status == "error":
@@ -1870,14 +2238,21 @@ if __name__ == "__main__":
             sys.exit(2)
         pid_path = Path(args.pid_file)
         state_path = Path(args.state_file)
+        route = getattr(args, "route", None)
+        # A route session starts parked on the first waypoint; play_route takes
+        # over once the DVT channel is up.
+        lat, lon = route.points[0] if route else (args.lat, args.lon)
         run_hold_session(
-            args.lat,
-            args.lon,
+            lat,
+            lon,
             pmd3_bin,
             args.connection,
             pid_path,
             state_path,
             log_path,
+            route=route,
+            speed_kmh=getattr(args, "speed", DEFAULT_ROUTE_SPEED_KMH),
+            loop_route=getattr(args, "loop", False),
         )
         sys.exit(0)
 
@@ -1910,11 +2285,7 @@ if __name__ == "__main__":
         amap_key = os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() or None
         if not amap_key:
             print(AMAP_KEY_HINT)
-        listen_host = getattr(args, "listen", None)
-        open_browser = not getattr(args, "no_browser", False)
-        if getattr(args, "remote", False):
-            listen_host = listen_host or "0.0.0.0"
-            open_browser = False
+        listen_host, open_browser = map_bind_from_args(args)
         coords = run_map_picker(
             amap_key,
             listen_host=listen_host,
@@ -1932,6 +2303,38 @@ if __name__ == "__main__":
             auto_set_location(
                 str(lat),
                 str(lon),
+                pmd3_bin,
+                args.connection,
+                log_path,
+                device_flag=device_flag,
+            )
+    elif args.command == "route":
+        route = args.route
+        if route is None:
+            amap_key = os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() or None
+            if not amap_key:
+                print(AMAP_KEY_HINT)
+            listen_host, open_browser = map_bind_from_args(args)
+            route = run_map_picker(
+                amap_key,
+                listen_host=listen_host,
+                listen_port=getattr(args, "port", None),
+                open_browser=open_browser,
+                route_mode=True,
+                speed_kmh=args.speed,
+                loop_route=args.loop,
+                pick_only=args.pick_only,
+            )
+            if route is None:
+                print("[-] 未提交路线（超时或关闭了浏览器）。")
+                sys.exit(1)
+        if args.pick_only:
+            print(json.dumps({"points": route.waypoints()}, ensure_ascii=False))
+        else:
+            auto_set_route(
+                route,
+                args.speed,
+                args.loop,
                 pmd3_bin,
                 args.connection,
                 log_path,

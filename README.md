@@ -384,6 +384,68 @@ $ export SIMLOCATION_MAP_TIMEOUT_SECONDS=900
 
 > 完整的随身部署方案（树莓派 + USB 连接 + 手机热点）见 [PORTABLE-HOST.md](PORTABLE-HOST.md)。
 
+## 运动轨迹
+
+定点定位之外，还可以让设备沿一条路线持续移动——适合测试跑步、骑行类 App，或者任何需要"位置在变"的场景。
+
+在地图上画一条路线并立即开始移动：
+
+```bash
+$ simlocation route
+```
+
+操作和选点类似：依次点击添加途经点，点标了序号、可以拖动调整，也能撤销上一个点或重新画。面板上会实时显示途经点数量、总里程和预计耗时。画完点「开始移动」。
+
+也可以直接用文件：
+
+```bash
+$ simlocation route my-route.json           # JSON 路线
+$ simlocation route track.gpx               # GPX（一条 track segment 或 route）
+$ simlocation route my-route.json --speed 12 --loop
+```
+
+| 选项 | 说明 |
+|---|---|
+| `--speed N` | 速度，km/h，默认 5（步行）。骑行大约 15-25，开车 40-80 |
+| `--loop` | 到终点后连回起点，循环移动 |
+| `--pick-only` | 只在地图上画路线并输出 JSON，不设置定位 |
+
+路线文件就是一个 WGS-84 坐标数组，格式很简单（也接受裸数组）：
+
+```json
+{
+  "points": [
+    [22.283900, 114.158100],
+    [22.284700, 114.159400],
+    [22.285600, 114.160300]
+  ]
+}
+```
+
+仓库里有一份可以直接跑的 [`examples/route.json`](examples/route.json)。想把地图上画的路线存下来以后复用，在面板上点「保存路线」即可下载成 JSON。
+
+移动中随时可以看进度：
+
+```bash
+$ simlocation status
+  UDID                      别名      默认   状态
+  00008130-0008...01EA001C  iphone    *      移动中 42% 12 km/h (22.285105, 114.159805) 第 2 圈
+```
+
+途经点之间走大圆路径，位置按**实际经过的时间**计算——某次 DVT 调用慢了不会让轨迹整体落后，下一次更新会直接跳到该到的位置。
+
+不加 `--loop` 时走到终点会**保持在终点**，不会跳回真实位置。结束移动和结束定点定位一样：
+
+```bash
+$ simlocation clear
+```
+
+运动轨迹同样支持远程选点，画路线这件事在手机上做其实比在电脑上更顺手：
+
+```bash
+$ simlocation route --remote --speed 12
+```
+
 ### 配置高德 Key（可选）
 
 如果你需要更精细的中国地图体验，可以配置一个免费的高德 JS API Key：
