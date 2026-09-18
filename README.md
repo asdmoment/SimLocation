@@ -481,6 +481,8 @@ $ export SIMLOCATION_AMAP_KEY=你的Key
 
 本项目基于 [`pymobiledevice3`](https://github.com/doronz88/pymobiledevice3) 实现设备通信和定位模拟功能。`pymobiledevice3` 由 [doronz88](https://github.com/doronz88) 开发维护，是一个纯 Python 实现的 iDevice 通信库。
 
+运动轨迹功能由 [@hoicau](https://github.com/hoicau) 贡献。
+
 ## 许可证
 
 本项目以 [GNU General Public License v3.0 (GPL-3.0)](LICENSE) 发布。
