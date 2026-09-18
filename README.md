@@ -27,7 +27,9 @@
 pip install pymobiledevice3 requests
 ```
 
-目前兼容 `pymobiledevice3` v8.x 和 v9.x。如果你从旧版本升级后遇到 `ModuleNotFoundError`，请确认升级后的版本已正确安装在当前 Python 环境中。
+代码保留了 `pymobiledevice3` v8.x 和 v9.x 的 DVT 导入兼容路径，已在 Linux + `pymobiledevice3` 11.15.4 上完成真机验证。如果升级后遇到 `ModuleNotFoundError`，请确认依赖已安装在当前 Python 环境中。
+
+如果通过 `pipx` 安装，系统 `python3` 可能无法导入该环境中的依赖。请将 `SIMLOCATION_PYTHON` 指向 pipx 环境的 Python，并确认该解释器同时安装了 `requests`。
 
 ## 设备准备
 
@@ -55,17 +57,19 @@ pip install pymobiledevice3 requests
 
 > 不需要真的用 Xcode 写代码，只要让它识别一次设备就行。识别后可以关闭 Xcode。
 
-**方法二：通过 pymobiledevice3 命令触发（无需 Mac）**
+**方法二：通过 pymobiledevice3 显示开发者模式入口（无需 Mac）**
 
-如果你没有 Mac 或不想装 Xcode，可以用 pymobiledevice3 直接启用：
+如果你没有 Mac 或不想装 Xcode，可以用 pymobiledevice3 显示设置中的开关：
 
 ```bash
 # 1. 先用 USB 连接设备，确保已点击"信任此电脑"
 # 2. 执行以下命令（不需要 tunneld）
-pymobiledevice3 amfi enable-developer-mode
+pymobiledevice3 amfi reveal-developer-mode
 ```
 
-执行后手机会提示重启，重启后在弹出的确认对话框中点击"打开"即可。
+执行后进入「设置 → 隐私与安全性 → 开发者模式」开启开关，按提示重启。重启后解锁设备，在确认对话框中点击「打开」，按要求输入锁屏密码。
+
+设备设有锁屏密码时，iOS 会拒绝 `amfi enable-developer-mode` 的远程启用请求；通过上述设置入口完成启用即可。
 
 > 如果命令报错，请确认设备已通过 USB 连接并信任了当前电脑。Windows 需要先安装 iTunes。
 
@@ -106,6 +110,7 @@ $ pymobiledevice3 usbmux list
 - 检查设备是否已解锁并信任了当前电脑
 - Windows 用户需确认已安装 [iTunes](https://www.apple.com/itunes/) 或 Apple Devices（提供 USB 驱动）
 - Linux 用户需确认 `usbmuxd` 服务正在运行（`sudo systemctl start usbmuxd`）
+- Linux 上若 tunneld 能看到设备，但连接 RSD 报 `Network is unreachable`，请检查 IPv6 policy routing（`ip -6 rule`）和目标地址的路由。代理 TUN 的 `unreachable` 规则可能阻断 iPhone tunnel，需要为设备 tunnel 配置路由例外。
 - 如果看到 `Failed to setupterm(kind='xterm-ghostty')` 警告，这是 pymobiledevice3 的依赖库不认识 Ghostty 终端，不影响功能。可通过 `export TERM=xterm-256color` 消除警告
 
 ## 基本准备
@@ -173,6 +178,8 @@ $ simlocation set <纬度> <经度>
 ```
 
 > 为了向后兼容，`simlocation <纬度> <经度>`（不带 `set`）也同样有效。
+
+纬度必须在 `-90` 到 `90` 之间，经度必须在 `-180` 到 `180` 之间。无效坐标、未知参数和多余参数会在连接设备前报错。
 
 清除模拟定位：
 
@@ -249,6 +256,14 @@ $ simlocation device default
 $ simlocation set --device <别名> <纬度> <经度>
 $ simlocation clear --device <别名>
 ```
+
+`--device`、`--connection`、`--debug` 和 `--log-file` 可以放在子命令前后，例如 `simlocation --device <别名> clear` 与上面的清除命令等效。
+
+使用 `--connection rsd` 复用现有 tunnel 时，只会匹配目标设备的 UDID；目标设备没有可用 tunnel 时会重试并报错。
+
+每轮连接 RSD 时会对同一地址最多探测 3 次，失败后间隔 1.5 秒重试，以等待新 tunnel 的路由就绪。持续不可达时会明确报错。
+
+切换定位或清除定位前，会先确认旧后台会话已停止。旧会话停止失败时，本次操作会报错退出。新会话启动失败或超时后，会终止并回收本次创建的进程；回收失败会明确报错。
 
 **查看所有会话状态**
 
@@ -342,7 +357,15 @@ $ export SIMLOCATION_AMAP_KEY=你的Key
 | Windows | 支持 | 需安装 iTunes 或 Apple Devices 提供 USB 驱动 |
 | Linux | 支持 | 需要 usbmuxd 服务运行 |
 
-本项目面向配合 iPhone 或 iPad 的本地定位测试，暂时不考虑覆盖 Android 或更通用的设备管理流程。
+## 开发验证
+
+无需安装设备通信依赖或连接设备，即可运行 regression tests：
+
+```bash
+python3 -B -m unittest discover -s tests -v
+```
+
+测试覆盖参数解析、USB 设备发现、目标设备 RSD 匹配、连接重试和后台进程生命周期。设备通信使用 mock；POSIX 平台另有真实本地子进程的超时回收检查。
 
 ## 致谢
 

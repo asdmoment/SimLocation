@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 
-import requests
-import subprocess
-import sys
-import shlex
 import argparse
 import asyncio
 import json
+import math
 import os
-import signal
+import shlex
 import shutil
+import signal
 import socket
-import time
+import subprocess
+import sys
 import threading
+import time
 import webbrowser
 from contextlib import suppress
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional
+
+import requests
 from pymobiledevice3.remote.remote_service_discovery import (
     RemoteServiceDiscoveryService,
 )
@@ -56,6 +58,7 @@ RSD_FETCH_RETRIES = 3
 COMMAND_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.5
 RSD_CONNECT_TIMEOUT_SECONDS = 2
+RSD_CONNECT_RETRIES = 3
 DEFAULT_LOG_PATH = RUNTIME_DIR / "simlocation.log"
 DEFAULT_PID_PATH = RUNTIME_DIR / "simlocation.pid"
 DEFAULT_STATE_PATH = RUNTIME_DIR / "simlocation.state.json"
@@ -169,7 +172,7 @@ def stop_hold_session(pid_path, state_path, log_path=None, quiet=False):
     pid = read_pid(pid_path)
     if pid is None:
         remove_file_if_exists(pid_path)
-        return False
+        return True
 
     if not is_process_alive(pid):
         if not quiet:
@@ -177,7 +180,7 @@ def stop_hold_session(pid_path, state_path, log_path=None, quiet=False):
                 f"[*] 发现旧的后台定位进程已不存在，清理 PID 文件: {pid}", log_path
             )
         remove_file_if_exists(pid_path)
-        return False
+        return True
 
     if not quiet:
         log_message(f"[*] 正在停止后台定位会话，PID: {pid}", log_path)
@@ -191,10 +194,16 @@ def stop_hold_session(pid_path, state_path, log_path=None, quiet=False):
             kernel32.TerminateProcess(handle, 1)
             kernel32.CloseHandle(handle)
     else:
-        os.kill(pid, signal.SIGTERM)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            log_message(f"[!] 无法停止后台定位进程 {pid}: {exc}", log_path)
+            return False
 
-    deadline = time.time() + CMD_TIMEOUT_SECONDS
-    while time.time() < deadline:
+    deadline = time.monotonic() + CMD_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
         if not is_process_alive(pid):
             break
         time.sleep(HOLD_POLL_INTERVAL_SECONDS)
@@ -293,14 +302,19 @@ def get_latest_rsd(log_path=None, udid=None):
     for attempt in range(1, RSD_FETCH_RETRIES + 1):
         try:
             data = get_tunneld_snapshot(log_path)
-            if udid and isinstance(data, dict) and udid in data:
-                rsd_pair = extract_rsd_pair(data[udid])
+            if udid:
+                rsd_pair = (
+                    extract_rsd_pair(data[udid])
+                    if isinstance(data, dict) and udid in data
+                    else None
+                )
+                last_error = f"未在 tunneld 返回中找到设备 {udid} 的可用地址/端口。"
             else:
                 rsd_pair = extract_rsd_pair(data)
+                last_error = "未在 tunneld 返回中找到可用地址/端口。"
             if rsd_pair:
                 log_message(f"[*] 获取到 RSD: {rsd_pair[0]} {rsd_pair[1]}", log_path)
                 return rsd_pair
-            last_error = f"未在 tunneld 返回中找到可用地址/端口，返回内容: {data}"
         except Exception as e:
             last_error = f"无法获取 RSD 信息，请检查 tunneld 是否正在运行: {e}"
 
@@ -349,7 +363,7 @@ def discover_devices(pmd3_bin, log_path=None):
         pass
     try:
         result = subprocess.run(
-            [pmd3_bin, "usbmux", "list", "--no-color"],
+            [pmd3_bin, "usbmux", "list"],
             capture_output=True, text=True, timeout=CMD_TIMEOUT_SECONDS,
         )
         if result.returncode == 0:
@@ -511,6 +525,21 @@ def is_rsd_reachable(host, port, log_path=None):
     return False
 
 
+def wait_for_rsd_reachable(rsd_pair, log_path=None):
+    """Allow a newly created tunnel's route to become usable before failing."""
+    for attempt in range(1, RSD_CONNECT_RETRIES + 1):
+        if is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
+            return True
+        if attempt < RSD_CONNECT_RETRIES:
+            log_message(
+                f"[!] 等待 RSD 连接就绪，{RETRY_DELAY_SECONDS} 秒后重试 "
+                f"({attempt}/{RSD_CONNECT_RETRIES})。",
+                log_path,
+            )
+            time.sleep(RETRY_DELAY_SECONDS)
+    return False
+
+
 def build_location_command(pmd3_bin, action, lat=None, lon=None, rsd_pair=None):
     cmd = [
         pmd3_bin,
@@ -611,7 +640,7 @@ def run_hold_session(
             rsd_pair = get_latest_rsd(log_path, udid)
         if not rsd_pair:
             raise RuntimeError("未找到有效的 RSD 隧道")
-        if not is_rsd_reachable(rsd_pair[0], rsd_pair[1], log_path):
+        if not wait_for_rsd_reachable(rsd_pair, log_path):
             raise RuntimeError(f"RSD 端口不可达: {rsd_pair[0]}:{rsd_pair[1]}")
 
         asyncio.run(
@@ -637,12 +666,40 @@ def run_hold_session(
         remove_file_if_exists(pid_path)
 
 
+def cleanup_failed_hold_session(proc, pid_path, state_path, log_path=None):
+    """Reap the child before reporting a failed startup, preserving other sessions."""
+    try:
+        if proc.poll() is None:
+            with suppress(ProcessLookupError):
+                proc.terminate()
+        try:
+            proc.wait(timeout=CMD_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            with suppress(ProcessLookupError):
+                proc.kill()
+            proc.wait(timeout=CMD_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log_message(f"[!] 无法回收启动失败的后台进程 {proc.pid}: {exc}", log_path)
+        return
+
+    if read_pid(pid_path) == proc.pid:
+        remove_file_if_exists(pid_path)
+    state = read_state(state_path)
+    if state and state.get("pid") == proc.pid and state.get("status") != "error":
+        state["status"] = "error"
+        state["error"] = "后台定位会话未成功启动，进程已停止。"
+        state["failed_at"] = datetime.now().isoformat(timespec="seconds")
+        write_state(state_path, state)
+
+
 def start_hold_session(
     lat, lon, pmd3_bin, connection_mode, udid, log_path=None
 ):
     pid_path = pid_path_for(udid)
     state_path = state_path_for(udid)
-    stop_hold_session(pid_path, state_path, log_path, quiet=True)
+    if not stop_hold_session(pid_path, state_path, log_path, quiet=True):
+        log_message("[!] 旧后台定位会话未停止，取消启动新会话。", log_path)
+        return False
 
     cmd = [
         sys.executable,
@@ -675,38 +732,37 @@ def start_hold_session(
         popen_kwargs["close_fds"] = True
     proc = subprocess.Popen(cmd, **popen_kwargs)
 
-    deadline = time.time() + HOLD_START_TIMEOUT_SECONDS
-    while time.time() < deadline:
-        state = read_state(state_path)
-        if state and state.get("pid") == proc.pid:
-            status = state.get("status")
-            if status == "ready":
-                return True
-            if status == "error":
-                log_message(
-                    f"[!] 后台定位会话启动失败: {state.get('error', 'unknown error')}",
-                    log_path,
-                )
-                return False
-        if proc.poll() is not None:
+    ready = False
+    try:
+        deadline = time.monotonic() + HOLD_START_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
             state = read_state(state_path)
-            if state and state.get("status") == "error":
-                log_message(
-                    f"[!] 后台定位会话启动失败: {state.get('error', 'unknown error')}",
-                    log_path,
-                )
-            else:
+            if state and state.get("pid") == proc.pid:
+                status = state.get("status")
+                if status == "ready" and proc.poll() is None:
+                    ready = True
+                    return True
+                if status == "error":
+                    log_message(
+                        f"[!] 后台定位会话启动失败: {state.get('error', 'unknown error')}",
+                        log_path,
+                    )
+                    return False
+            if proc.poll() is not None:
                 log_message(
                     f"[!] 后台定位进程意外退出，退出码: {proc.returncode}", log_path
                 )
-            return False
-        time.sleep(HOLD_POLL_INTERVAL_SECONDS)
+                return False
+            time.sleep(HOLD_POLL_INTERVAL_SECONDS)
 
-    log_message(
-        f"[!] 后台定位会话在 {HOLD_START_TIMEOUT_SECONDS} 秒内未进入 ready 状态。",
-        log_path,
-    )
-    return False
+        log_message(
+            f"[!] 后台定位会话在 {HOLD_START_TIMEOUT_SECONDS} 秒内未进入 ready 状态。",
+            log_path,
+        )
+        return False
+    finally:
+        if not ready:
+            cleanup_failed_hold_session(proc, pid_path, state_path, log_path)
 
 
 def auto_set_location(
@@ -733,7 +789,9 @@ def clear_location(
         udid = resolve_device_udid(pmd3_bin, log_path, device_flag=device_flag)
     pid_path = pid_path_for(udid)
     state_path = state_path_for(udid)
-    stop_hold_session(pid_path, state_path, log_path, quiet=False)
+    if not stop_hold_session(pid_path, state_path, log_path, quiet=False):
+        log_message("[!] 后台定位会话未停止，取消清除操作。", log_path)
+        sys.exit(1)
     for attempt in range(1, COMMAND_RETRIES + 1):
         if connection_mode == "auto":
             rsd_pair = request_fresh_rsd(udid, log_path)
@@ -743,8 +801,7 @@ def clear_location(
             log_message("未找到有效的 RSD 隧道，无法清除定位。", log_path)
             sys.exit(1)
 
-        rsd_address, rsd_port = rsd_pair
-        if not is_rsd_reachable(rsd_address, rsd_port, log_path):
+        if not wait_for_rsd_reachable(rsd_pair, log_path):
             if attempt < COMMAND_RETRIES:
                 log_message(
                     f"[!] 当前 RSD 不可达，{RETRY_DELAY_SECONDS} 秒后重新获取。",
@@ -917,59 +974,62 @@ def run_map_picker(amap_key=None):
     return server.picked_coords
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        prog="simlocation",
-        description="通过 pymobiledevice3 自动设置 iPhone 虚拟定位。",
-    )
-    parser.add_argument(
+def parse_args(argv=None):
+    common = argparse.ArgumentParser(prog="simlocation", add_help=False, allow_abbrev=False)
+    common.add_argument(
         "--debug",
         action="store_true",
         help="记录详细日志到文件，便于排查热点场景下的不稳定问题",
     )
-    parser.add_argument(
+    common.add_argument(
         "--log-file",
         default=str(DEFAULT_LOG_PATH),
         help="调试日志文件路径，默认写到项目目录下的 var/simlocation.log",
     )
-    parser.add_argument(
+    common.add_argument(
         "--connection",
         choices=("auto", "rsd"),
         default="auto",
         help="连接模式。auto 会让 tunneld 为当前设备创建新 tunnel；rsd 复用 tunneld 当前已有的 RSD。",
     )
-    parser.add_argument(
+    common.add_argument(
         "--device", "-d",
         default=None,
         help="目标设备（别名或 UDID）",
     )
-    parser.add_argument("--_hold-session", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument(
+    common.add_argument("--_hold-session", action="store_true", help=argparse.SUPPRESS)
+    common.add_argument(
         "--pid-file", default=str(DEFAULT_PID_PATH), help=argparse.SUPPRESS
     )
-    parser.add_argument(
+    common.add_argument(
         "--state-file", default=str(DEFAULT_STATE_PATH), help=argparse.SUPPRESS
     )
     # Backward compat: --clear flag (legacy)
-    parser.add_argument(
+    common.add_argument(
         "--clear",
         action="store_true",
         help=argparse.SUPPRESS,
     )
 
+    parser = argparse.ArgumentParser(
+        prog="simlocation",
+        description="通过 pymobiledevice3 自动设置 iPhone 虚拟定位。",
+        parents=[common],
+        allow_abbrev=False,
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     # simlocation set <lat> <lon>
-    sub_set = subparsers.add_parser("set", help="设置虚拟定位")
+    sub_set = subparsers.add_parser("set", help="设置虚拟定位", allow_abbrev=False)
     sub_set.add_argument("lat", help="纬度")
     sub_set.add_argument("lon", help="经度")
 
     # simlocation clear
-    sub_clear = subparsers.add_parser("clear", help="清除虚拟定位，恢复真实位置")
+    sub_clear = subparsers.add_parser("clear", help="清除虚拟定位，恢复真实位置", allow_abbrev=False)
     sub_clear.add_argument("--all", action="store_true", dest="clear_all", help="清除所有设备的虚拟定位")
 
     # simlocation map [--pick-only]
-    sub_map = subparsers.add_parser("map", help="打开地图选点，选择后自动设置定位")
+    sub_map = subparsers.add_parser("map", help="打开地图选点，选择后自动设置定位", allow_abbrev=False)
     sub_map.add_argument(
         "--pick-only",
         action="store_true",
@@ -995,74 +1055,55 @@ def parse_args():
     sub_device_default = device_subparsers.add_parser("default", help="设置或查看默认设备")
     sub_device_default.add_argument("name", nargs="?", default=None, help="别名或 UDID（省略则查看当前默认）")
 
-    # Try normal parse first; if it fails on subcommand matching,
-    # fall back to legacy positional arg handling.
-    try:
-        _stderr = sys.stderr
-        sys.stderr = open(os.devnull, "w")
-        args, remaining = parser.parse_known_args()
-        sys.stderr = _stderr
-    except SystemExit as e:
-        sys.stderr = _stderr
-        if e.code == 0:
-            # --help or similar triggered a clean exit
-            sys.exit(0)
-        # argparse exits on error — intercept to handle legacy format.
-        # Re-parse without subparsers: strip argv to find bare lat/lon.
-        raw = sys.argv[1:]
-        legacy_parser = argparse.ArgumentParser(add_help=False)
-        legacy_parser.add_argument("--clear", action="store_true")
-        legacy_parser.add_argument("--debug", action="store_true")
-        legacy_parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
-        legacy_parser.add_argument("--connection", choices=("auto", "rsd"), default="auto")
-        legacy_parser.add_argument("--device", "-d", default=None)
-        legacy_parser.add_argument("--_hold-session", action="store_true")
-        legacy_parser.add_argument("--pid-file", default=str(DEFAULT_PID_PATH))
-        legacy_parser.add_argument("--state-file", default=str(DEFAULT_STATE_PATH))
-        largs, positional = legacy_parser.parse_known_args(raw)
-
-        args = largs
-        args.command = None
-        remaining = positional
-
-    # Backward compat: simlocation <lat> <lon> (no subcommand)
-    if args.command is None and not getattr(args, "clear", False) and not getattr(args, "_hold_session", False):
-        if len(remaining) >= 2:
-            args.command = "set"
-            args.lat = remaining[0]
-            args.lon = remaining[1]
-        elif len(remaining) == 0:
-            env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
-            env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
-            if env_lat is not None and env_lon is not None:
-                args.command = "set"
-                args.lat = env_lat
-                args.lon = env_lon
-            else:
-                parser.print_help()
-                sys.exit(1)
-        elif remaining:
-            parser.error(f"无法识别的参数: {' '.join(remaining)}")
-
-    # Backward compat: --clear flag
-    if getattr(args, "clear", False) and args.command is None:
-        args.command = "clear"
-
-    # _hold-session needs lat/lon
-    if getattr(args, "_hold_session", False) and args.command is None:
-        if len(remaining) >= 2:
-            args.command = "set"
-            args.lat = remaining[0]
-            args.lon = remaining[1]
+    # Extract shared options first so they work on either side of a subcommand.
+    # The final strict parse rejects every unconsumed option or positional arg.
+    shared_args, remaining = common.parse_known_args(argv)
+    if shared_args.clear:
+        if remaining and remaining[0] != "clear":
+            parser.error("--clear 不能与其他命令或坐标一起使用。")
+        if not remaining:
+            remaining = ["clear"]
+    elif not remaining:
+        env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
+        env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
+        if env_lat is not None and env_lon is not None:
+            remaining = ["set", "--", env_lat, env_lon]
         else:
-            env_lat = os.environ.get("SIMLOCATION_DEFAULT_LAT")
-            env_lon = os.environ.get("SIMLOCATION_DEFAULT_LON")
-            if env_lat is not None and env_lon is not None:
-                args.command = "set"
-                args.lat = env_lat
-                args.lon = env_lon
-            else:
-                parser.error("_hold-session 需要坐标参数。")
+            parser.print_help()
+            sys.exit(1)
+    elif remaining[0] == "--":
+        remaining.insert(0, "set")
+    else:
+        # Only a numeric first argument can select legacy coordinate syntax.
+        try:
+            float(remaining[0])
+        except ValueError:
+            pass
+        else:
+            remaining.insert(0, "set")
+
+    # argparse otherwise treats negative scientific notation as an option.
+    if remaining[0] == "set" and len(remaining) == 3:
+        try:
+            float(remaining[1])
+            float(remaining[2])
+        except ValueError:
+            pass
+        else:
+            remaining.insert(1, "--")
+
+    args = parser.parse_args(remaining, namespace=shared_args)
+    if args._hold_session and args.command != "set":
+        parser.error("_hold-session 只能用于 set 命令。")
+    if args.command == "set":
+        for name, limit in (("lat", 90), ("lon", 180)):
+            value = getattr(args, name)
+            try:
+                number = float(value)
+            except ValueError:
+                parser.error(f"{name} 必须是有效数字: {value}")
+            if not math.isfinite(number) or not -limit <= number <= limit:
+                parser.error(f"{name} 必须在 {-limit} 到 {limit} 之间: {value}")
 
     return args
 

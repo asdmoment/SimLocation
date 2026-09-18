@@ -30,8 +30,8 @@
 
 - There is no `pyproject.toml`, `package.json`, `Makefile`, `pytest.ini`, or `tox.ini`.
 - There is no repo-defined lint command.
-- There is no committed automated test suite.
-- Treat this as a script-first repository with manual verification.
+- Regression tests use standard-library `unittest` in `tests/test_simlocation.py`.
+- Treat this as a script-first repository; hardware verification remains manual.
 
 ## Environment Assumptions
 
@@ -60,6 +60,7 @@
 
 ## Verification Commands
 
+- Regression tests without device dependencies: `python3 -B -m unittest discover -s tests -v`
 - Python syntax check: `python3 -m py_compile bin/simlocation.py`
 - Shell syntax check: `bash -n bin/simlocation`
 - Shell helper syntax check: `bash -n tools/pm3-afc-sync.sh`
@@ -68,10 +69,10 @@
 
 ## Single-Test Guidance
 
-- There is no committed unit-test suite right now.
-- There is therefore no true repo-native "single test" command to run.
+- Run one regression test: `python3 -B -m unittest discover -s tests -k test_timeout_reaps_child_and_marks_failure -v`
+- Tests mock device dependencies and isolate runtime files in temporary directories. The real subprocess cleanup test runs on POSIX only.
 - For targeted verification, run the narrowest file-level check that matches your edit.
-- Python-only edits: `python3 -m py_compile bin/simlocation.py`
+- Python-only edits: `python3 -m py_compile bin/simlocation.py` and the relevant regression tests.
 - Launcher-only edits: `bash -n bin/simlocation`
 - Helper-script edits: `bash -n tools/pm3-afc-sync.sh`
 - Non-destructive helper check: `bash tools/pm3-afc-sync.sh --dry-run --tunnel --push-local <local-path> --push-remote <remote-path>`
