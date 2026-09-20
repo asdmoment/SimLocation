@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.4.0
 
 - 修复 OSM 地图瓦片可能返回 403：瓦片请求使用官方主机并仅发送 origin 作为 Referer，满足 OSM 要求且不泄露页面访问令牌。
 - 新增 `simlocation web` 常驻网页控制台：定点定位、运动轨迹、JSON／GPX 导入导出、多设备与别名管理、实时会话状态、清除定位及只读诊断均可在浏览器操作。支持手机布局和深色模式。
@@ -9,6 +9,9 @@
 - 新增网页 API 测试，覆盖认证、输入校验、并发操作、失败恢复、状态和设备管理，并补充两个 provider 的嵌入编辑与坐标转换测试。
 - 修复常驻网页的子进程回收：会话退出后及时回收，避免 zombie 被误判为存活，导致清除定位额外等待 8 秒并重复连接设备。新增真实子进程的停止与失败退出回归测试。
 - 网页控制台已在 Linux、pymobiledevice3 11.15.4、iPhone 15 Pro（iOS 27.0）完成真机 DVT 测试：设置与替换定位、无效路线隔离、JSON 路线到终点保持、GPX 循环、关闭再打开网页、单台与批量清除，以及后台进程回收。
+- `/favicon.ico` 返回 204 而非 403：浏览器每次加载都会无令牌请求它，原先会让一个正常工作的控制台在自己的日志里报错。
+- README 补回 `SIMLOCATION_UDID`，并首次补上 `SIMLOCATION_PMD3`（此前只在 `CLAUDE.md` 里有）。
+- 已在 macOS + pymobiledevice3 11.15.5 复验：定点、轨迹回放、网页控制台设置与清除均正常。注意 `remote tunneld` 在 11.x 仍需 root，免 root 的原生隧道只覆盖一次性的 `remote start-tunnel`。
 
 ## v3.3.0
 
