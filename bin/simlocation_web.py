@@ -245,6 +245,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         return parts.path, query
 
     def do_GET(self):
+        if urlsplit(self.path).path == "/favicon.ico":
+            # Browsers ask for this on every load and never carry the token, so
+            # the console would log a 403 against itself. 204 says "nothing
+            # here" without revealing more than the 403 already did.
+            self.respond(204, b"")
+            return
         path, query = self.route()
         if path is None:
             return
