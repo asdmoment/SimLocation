@@ -32,6 +32,7 @@ function routeLength(points) {
 
 function refreshRoute() {
   drawRoute(routePoints);
+  notifyMapSelection();
   var meters = routeLength(routePayload().points);
   var minutes = meters / (Number("{{ROUTE_SPEED}}") / 3.6) / 60;
   document.getElementById("coords").textContent = routePoints.length < 2
@@ -91,4 +92,41 @@ function initRouteEditor(draw, toWgs) {
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   };
   refreshRoute();
+}
+
+/* The persistent console embeds this same picker. Messages only edit drafts;
+   device operations remain explicit buttons in the parent console. */
+var mapBridge = null;
+function notifyMapSelection(point) {
+  if (!mapBridge || mapBridge.restoring) return;
+  window.parent.postMessage({ type: "simlocation-selection", mode: routeMode ? "route" : "point",
+    points: routeMode ? routePayload().points : [point] }, window.location.origin);
+}
+
+function initMapBridge(toMap, setPoint, focus) {
+  if (window.parent === window || !/[?&]embed=1(?:&|$)/.test(window.location.search)) return;
+  mapBridge = { restoring: false };
+  var style = document.createElement("style");
+  style.textContent = "#panel { display: none !important; }";
+  document.head.appendChild(style);
+  window.addEventListener("message", function (event) {
+    if (event.source !== window.parent || event.origin !== window.location.origin) return;
+    var data = event.data;
+    if (!data || data.type !== "simlocation-draft") return;
+    if (data.mode !== (routeMode ? "route" : "point")) return;
+    mapBridge.restoring = true;
+    try {
+      if (routeMode) {
+        routeLoop = !!data.loop;
+        routePoints = data.points.map(toMap);
+        refreshRoute();
+      } else if (data.points.length) {
+        setPoint(toMap(data.points[0]));
+      }
+      if (data.focus && data.points.length) focus(data.points.map(toMap));
+    } finally {
+      mapBridge.restoring = false;
+    }
+  });
+  window.parent.postMessage({ type: "simlocation-map-ready" }, window.location.origin);
 }

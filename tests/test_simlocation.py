@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
@@ -479,6 +480,54 @@ class HoldSessionStopTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HoldSessionTests(unittest.TestCase):
+    def test_persistent_parent_reaps_stopped_session_without_another_spawn(self):
+        # Use a real OS child: polling it here would hide the zombie bug.
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                with (
+                    patch.object(simlocation, "RUNTIME_DIR", Path(directory)),
+                    patch.object(simlocation.subprocess, "Popen", return_value=proc),
+                    patch.object(simlocation, "wait_for_hold_session", return_value=True),
+                    patch.object(simlocation, "CMD_TIMEOUT_SECONDS", 1),
+                ):
+                    self.assertTrue(simlocation.start_hold_session(1, 2, "pmd3", "rsd", "phone"))
+                    pid_path = simlocation.pid_path_for("phone")
+                    pid_path.write_text(str(proc.pid))
+                    self.assertTrue(simlocation.stop_hold_session(
+                        pid_path, simlocation.state_path_for("phone"), quiet=True,
+                    ))
+                    self.assertFalse(pid_path.exists())
+                    self.assertIsNotNone(proc.returncode)
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+            proc.wait(timeout=5)
+
+    def test_persistent_parent_reaps_session_that_exits_after_startup_failure(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                with (
+                    patch.object(simlocation, "RUNTIME_DIR", Path(directory)),
+                    patch.object(simlocation.subprocess, "Popen", return_value=proc),
+                    patch.object(simlocation, "wait_for_hold_session", return_value=False),
+                ):
+                    self.assertFalse(simlocation.start_hold_session(1, 2, "pmd3", "rsd", "phone"))
+                    proc.stdin.close()
+                    deadline = time.monotonic() + 5
+                    while proc.returncode is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertEqual(proc.returncode, 0)
+        finally:
+            if not proc.stdin.closed:
+                proc.stdin.close()
+            if proc.returncode is None:
+                proc.kill()
+            proc.wait(timeout=5)
+
     def test_default_start_timeout_is_sixty_seconds(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(simlocation.get_hold_start_timeout_seconds(), 60.0)

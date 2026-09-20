@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>SimLocation</title>
+  <link rel="stylesheet" href="/console.css?{{TOKEN_QUERY}}">
+  <script src="/console.js?{{TOKEN_QUERY}}" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="#" aria-label="SimLocation 首页"><span class="brand-mark" aria-hidden="true">S</span>SimLocation <span id="version"></span></a>
+    <div id="connection-status" role="status">正在连接控制台</div>
+  </header>
+  <main>
+    <aside class="workspace" aria-label="定位控制台">
+      <section class="device-picker">
+        <div class="section-label"><label for="device">目标设备</label><button id="discover" class="text-button" type="button" data-operation>扫描设备</button></div>
+        <select id="device"><option value="">选择设备</option><option value="manual">输入 UDID…</option></select>
+        <label id="manual-device-field" hidden>设备 UDID<input id="manual-device" type="text" placeholder="完整 UDID" autocomplete="off" spellcheck="false"></label>
+        <p id="device-hint" class="muted">连接设备后扫描，也可以手动输入 UDID。</p>
+      </section>
+      <nav class="tabs" aria-label="工作区">
+        <button id="tab-point" type="button" aria-pressed="true" data-tab="point">定点</button>
+        <button id="tab-route" type="button" aria-pressed="false" data-tab="route">运动轨迹</button>
+        <button id="tab-devices" type="button" aria-pressed="false" data-tab="devices">设备</button>
+        <button id="tab-doctor" type="button" aria-pressed="false" data-tab="doctor">诊断</button>
+      </nav>
+      <div class="editor">
+        <section id="view-point">
+          <h1>设置模拟定位</h1>
+          <p class="muted">搜索地点、点击地图，或输入 WGS-84 坐标。</p>
+          <form id="point-form">
+            <div class="coordinate-fields">
+              <label for="latitude">纬度<input id="latitude" type="number" step="any" min="-90" max="90" placeholder="−90 至 90" required></label>
+              <label for="longitude">经度<input id="longitude" type="number" step="any" min="-180" max="180" placeholder="−180 至 180" required></label>
+            </div>
+            <button class="primary full" id="set-location" type="submit" data-operation>设置定位</button>
+          </form>
+          <button id="save-point" class="text-button" type="button">导出坐标</button>
+          <p class="note">选点和导出仅编辑草稿。点击「设置定位」后才会应用到设备。</p>
+        </section>
+        <section id="view-route" hidden>
+          <h1>运动轨迹</h1>
+          <p class="muted">依次点击地图添加途经点，拖动标记调整路线。</p>
+          <div class="route-summary"><strong id="route-distance">0.00 <small>km</small></strong><span id="route-estimate">至少选择两个途经点</span></div>
+          <div class="row route-tools">
+            <button id="route-undo" type="button">撤销</button><button id="route-reset" type="button">重画</button>
+            <button id="route-import" type="button">导入</button><button id="route-export" type="button">导出</button>
+            <input id="route-file" type="file" accept=".json,.gpx,application/json,application/gpx+xml" hidden>
+          </div>
+          <div class="row route-options"><label for="speed">速度 <span class="muted">km/h</span><input id="speed" type="number" min="0.001" max="1000" step="any" value="5" required></label>
+            <label class="checkbox"><input id="loop" type="checkbox">循环移动</label></div>
+          <p class="note" id="route-hint">途经点之间沿大圆路径移动，到达终点后保持定位。</p>
+          <button id="start-route" class="primary full" type="button" data-operation>开始移动</button>
+        </section>
+        <section id="view-devices" hidden>
+          <h1>多设备管理</h1>
+          <p class="muted" id="scan-time">尚未扫描设备</p>
+          <div id="devices-list" class="device-list"></div>
+          <form id="alias-form"><label for="alias">为目标设备添加别名<input id="alias" maxlength="100" placeholder="例如 my-iphone" required autocomplete="off"></label><button type="submit" data-operation>保存别名</button></form>
+          <button id="set-default" type="button" data-operation>设为默认设备</button>
+          <button id="clear-all" class="danger-text" type="button" data-operation>清除全部活跃会话</button>
+        </section>
+        <section id="view-doctor" hidden>
+          <h1>只读诊断</h1>
+          <p class="muted">检查 Python、pymobiledevice3、tunneld 和目标设备。诊断不会修改设备或 tunnel。</p>
+          <button id="doctor" class="primary full" type="button" data-operation>运行 doctor</button>
+          <div id="doctor-results" class="checks"></div>
+        </section>
+        <details class="options"><summary>连接选项</summary>
+          <label for="connection-mode">Tunnel 模式<select id="connection-mode"><option value="auto">auto — 自动恢复连接</option><option value="rsd">rsd — 仅使用现有连接</option></select></label>
+          <label class="checkbox"><input id="debug" type="checkbox">记录调试日志</label>
+        </details>
+        <div id="feedback" role="alert" hidden></div>
+        <section id="operation" class="operation" aria-live="polite" hidden><strong id="operation-title"></strong><p id="operation-detail" class="muted"></p><details><summary>操作日志</summary><pre id="operation-log"></pre></details></section>
+      </div>
+      <section class="session" aria-label="当前设备状态">
+        <div class="section-label"><span>当前会话</span><span id="session-mode" class="muted">未选择设备</span></div>
+        <p id="session-status">选择设备后可查看定位状态。</p>
+        <progress id="session-progress" max="1" value="0" hidden></progress>
+        <button id="clear-location" class="full" type="button" data-operation>清除定位</button>
+        <p class="note">关闭网页后定位仍会继续。用完请清除定位。</p>
+      </section>
+    </aside>
+    <section class="map-workspace" aria-label="地图编辑器">
+      <div class="map-header"><span id="map-mode">地图选点</span><span id="map-provider" class="muted">OpenStreetMap / WGS-84</span></div>
+      <div class="map-frame"><iframe id="map" title="选择位置或绘制路线" referrerpolicy="no-referrer"></iframe></div>
+      <div class="map-footer"><span id="map-hint">正在加载地图…</span><span>WGS-84</span></div>
+    </section>
+  </main>
+  <dialog id="confirm-dialog"><form method="dialog"><h2 id="confirm-title">确认操作</h2><p id="confirm-description"></p><div class="row"><button value="cancel">取消</button><button value="confirm" class="primary">确认清除</button></div></form></dialog>
+</body>
+</html>
