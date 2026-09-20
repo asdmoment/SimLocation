@@ -7,11 +7,12 @@
 
 ## Repository Snapshot
 
-- Main Python CLI: `bin/simlocation.py`
+- Main Python CLI: `bin/simlocation.py`; persistent browser API: `bin/simlocation_web.py`
 - POSIX shell launcher: `bin/simlocation`; Windows launcher: `bin/simlocation.cmd`
+- Browser console: `web/console.html`, `web/console.css`, `web/console.js`
 - Map picker pages: `web/map-osm.html`, `web/map-amap.html`; shared route editor: `web/map-route.js`
 - AFC helper script: `tools/pm3-afc-sync.sh`
-- Unit tests: `tests/test_simlocation.py`, `tests/test_routes.py`; browser-side tests: `tests/test_map_routes.cjs` (Node, no deps)
+- Unit tests: `tests/test_simlocation.py`, `tests/test_routes.py`, `tests/test_web.py`; browser-side tests: `tests/test_map_routes.cjs` (Node, no deps)
 - Example route file: `examples/route.json`
 - User docs: `README.md`; release notes: `CHANGELOG.md`; version string: `VERSION`
 - Runtime artifacts (gitignored): `var/devices.json`, `var/<UDID>.pid`, `var/<UDID>.state.json`, and `var/simlocation.log` when `--debug` is used
@@ -44,6 +45,7 @@
 
 ## High-Value Commands
 
+- Open the persistent browser console: `bin/simlocation web` (or `web --remote --port 8765`)
 - Set a simulated location: `bin/simlocation set <lat> <lon>` (legacy `bin/simlocation <lat> <lon>` still works)
 - Clear simulated location: `bin/simlocation clear` (legacy `bin/simlocation --clear` still works)
 - Replay a moving route: `bin/simlocation route [file] [--speed KMH] [--loop]`; omit the file to draw one on the map
@@ -70,7 +72,8 @@
 
 - Unit tests: `python3 -m unittest discover -s tests -v` (the interpreter must import `requests` and `pymobiledevice3`; run with the same Python you point `SIMLOCATION_PYTHON` at)
 - Browser-side tests: `node tests/test_map_routes.cjs` (stdlib `node:test`; the `.cjs` extension keeps it CommonJS regardless of any `package.json` above the checkout)
-- Python syntax check: `python3 -m py_compile bin/simlocation.py`
+- Python syntax check: `python3 -m py_compile bin/simlocation.py bin/simlocation_web.py`
+- Browser console syntax check: `node --check web/console.js`
 - Shell syntax check: `bash -n bin/simlocation`
 - Shell helper syntax check: `bash -n tools/pm3-afc-sync.sh`
 - CLI smoke check with deps installed: `python3 bin/simlocation.py --help`
@@ -175,6 +178,16 @@
 - Update `README.md` if CLI usage, environment variables, or operator workflow changes.
 - Update this file if you add real tests, linting, build steps, or new agent rules.
 - Mention hardware or macOS-only verification gaps clearly in your final summary.
+
+## Browser Console Boundaries
+
+- Keep device operations in the existing CLI functions; the web API validates input and serializes operations in a worker. Never run interactive device selection in an HTTP handler.
+- Keep HTTP status reads independent of device discovery and DVT waits. Include devices with only a runtime state file.
+- Reap session children in persistent parents. A successful device clear does not prove the child was reaped; check process exit as well as the state and PID files.
+- Authenticate all console pages/assets and API requests, including loopback. API calls require the token header; do not add permissive CORS or log credential-bearing URLs.
+- The embedded maps only edit drafts through same-origin, source-checked messages. Device actions require explicit console controls.
+- `web` is persistent; legacy `map` and map-based `route` retain one-shot behavior and timeout semantics.
+- HTTP tests bind loopback ports and mock every device operation; no real device is required. Browser contract tests use SDK stubs for both providers.
 
 ## Recommended Agent Workflow
 

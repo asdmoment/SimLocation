@@ -24,7 +24,7 @@ from bisect import bisect_right
 from contextlib import redirect_stderr, suppress
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, quote
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from pymobiledevice3.remote.remote_service_discovery import (
@@ -95,6 +95,8 @@ EARTH_RADIUS_METERS = 6371008.8
 DEFAULT_ROUTE_SPEED_KMH = 5.0
 
 DEFAULT_DEVICES_PATH = RUNTIME_DIR / "devices.json"
+# Capture web job messages without redirecting stdout across HTTP threads.
+LOG_CONTEXT = threading.local()
 
 
 def read_devices(devices_path=DEFAULT_DEVICES_PATH):
@@ -112,10 +114,7 @@ def read_devices(devices_path=DEFAULT_DEVICES_PATH):
 
 
 def write_devices(data, devices_path=DEFAULT_DEVICES_PATH):
-    devices_path.parent.mkdir(parents=True, exist_ok=True)
-    devices_path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_state(devices_path, data)
 
 
 def resolve_alias(name, devices_data):
@@ -265,20 +264,30 @@ def parse_gpx_points(data):
     return segments[0]
 
 
+def parse_route_data(data, file_format="json", loop=False):
+    """Parse uploaded or local route bytes with the same limits and validation."""
+    if len(data) > MAX_ROUTE_BYTES:
+        raise ValueError(f"路线文件不能超过 {MAX_ROUTE_BYTES // (1024 * 1024)} MiB。")
+    try:
+        if file_format == "gpx":
+            points = parse_gpx_points(data)
+        elif file_format == "json":
+            decoded = json.loads(data)
+            points = decoded.get("points") if isinstance(decoded, dict) else decoded
+        else:
+            raise ValueError("仅支持 JSON 或 GPX 路线。")
+        return Route(points, loop=loop)
+    except (ValueError, ET.ParseError, RecursionError) as exc:
+        raise ValueError(f"路线内容无效: {exc}") from exc
+
+
 def load_route(path, loop=False):
     """Build a Route from a JSON waypoint list or a single-segment GPX file."""
     path = Path(path).expanduser()
     try:
         with path.open("rb") as handle:
             data = handle.read(MAX_ROUTE_BYTES + 1)
-        if len(data) > MAX_ROUTE_BYTES:
-            raise ValueError(f"路线文件不能超过 {MAX_ROUTE_BYTES // (1024 * 1024)} MiB。")
-        if path.suffix.lower() == ".gpx":
-            points = parse_gpx_points(data)
-        else:
-            decoded = json.loads(data)
-            points = decoded.get("points") if isinstance(decoded, dict) else decoded
-        return Route(points, loop=loop)
+        return parse_route_data(data, "gpx" if path.suffix.lower() == ".gpx" else "json", loop)
     except (OSError, ValueError, ET.ParseError, RecursionError) as exc:
         raise ValueError(f"无法读取路线 {path.name}: {exc}") from exc
 
@@ -293,6 +302,9 @@ def state_path_for(udid):
 
 def log_message(message, log_path=None):
     print(message)
+    sink = getattr(LOG_CONTEXT, "sink", None)
+    if sink:
+        sink(message)
     if not log_path:
         return
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1192,7 +1204,13 @@ def start_hold_session(
         popen_kwargs["start_new_session"] = True
         popen_kwargs["close_fds"] = True
     proc = subprocess.Popen(cmd, **popen_kwargs)
-    return wait_for_hold_session(proc, state_path, timeout_seconds, log_path)
+    try:
+        return wait_for_hold_session(proc, state_path, timeout_seconds, log_path)
+    finally:
+        # The web console outlives its children. Reap every session when it
+        # exits so a zombie cannot look alive to stop_hold_session(). Daemon
+        # threads let short-lived CLI commands still exit while sessions run.
+        threading.Thread(target=proc.wait, daemon=True).start()
 
 
 def auto_set_location(
@@ -1490,6 +1508,31 @@ def _open_app_window(url):
     webbrowser.open(url)
 
 
+def render_map_html(
+    amap_key=None, *, route_mode=False, speed_kmh=DEFAULT_ROUTE_SPEED_KMH,
+    loop_route=False, pick_only=False,
+):
+    html_path = MAP_AMAP_HTML_PATH if amap_key else MAP_OSM_HTML_PATH
+    template = html_path.read_text(encoding="utf-8")
+    html_text = template
+    # The route editor is shared by both providers, so it lives in its own file
+    # and is inlined here rather than served as a second endpoint.
+    html_text = html_text.replace(
+        "{{ROUTE_SCRIPT}}", MAP_ROUTE_SCRIPT_PATH.read_text(encoding="utf-8")
+    )
+    for placeholder, value in (
+        ("{{ROUTE_MODE}}", "true" if route_mode else "false"),
+        ("{{ROUTE_LOOP}}", "true" if loop_route else "false"),
+        ("{{PICK_ONLY}}", "true" if pick_only else "false"),
+        ("{{ROUTE_SPEED}}", repr(float(speed_kmh))),
+        ("{{MAX_ROUTE_POINTS}}", str(MAX_ROUTE_POINTS)),
+    ):
+        html_text = html_text.replace(placeholder, value)
+    if amap_key:
+        html_text = html_text.replace("{{AMAP_KEY}}", quote(amap_key, safe=""))
+    return html_text.encode("utf-8")
+
+
 def run_map_picker(
     amap_key=None, listen_host=None, listen_port=None, open_browser=True,
     *, route_mode=False, speed_kmh=DEFAULT_ROUTE_SPEED_KMH, loop_route=False,
@@ -1506,8 +1549,6 @@ def run_map_picker(
         if not required.is_file():
             print(f"[!] 地图页面文件不存在: {required}")
             sys.exit(1)
-    template = html_path.read_text(encoding="utf-8")
-
     listen_host = resolve_map_listen_host(listen_host)
     if listen_port is None:
         raw_port = os.environ.get("SIMLOCATION_MAP_PORT", "").strip()
@@ -1525,23 +1566,10 @@ def run_map_picker(
         sys.exit(1)
     port = server.server_address[1]
 
-    html_text = template
-    # The route editor is shared by both providers, so it lives in its own file
-    # and is inlined here rather than served as a second endpoint.
-    html_text = html_text.replace(
-        "{{ROUTE_SCRIPT}}", MAP_ROUTE_SCRIPT_PATH.read_text(encoding="utf-8")
+    server.map_html = render_map_html(
+        amap_key, route_mode=route_mode, speed_kmh=speed_kmh,
+        loop_route=loop_route, pick_only=pick_only,
     )
-    for placeholder, value in (
-        ("{{ROUTE_MODE}}", "true" if route_mode else "false"),
-        ("{{ROUTE_LOOP}}", "true" if loop_route else "false"),
-        ("{{PICK_ONLY}}", "true" if pick_only else "false"),
-        ("{{ROUTE_SPEED}}", repr(float(speed_kmh))),
-        ("{{MAX_ROUTE_POINTS}}", str(MAX_ROUTE_POINTS)),
-    ):
-        html_text = html_text.replace(placeholder, value)
-    if amap_key:
-        html_text = html_text.replace("{{AMAP_KEY}}", amap_key)
-    server.map_html = html_text.encode("utf-8")
     server.picked_coords = None
     server.route_mode = route_mode
     server.loop_route = loop_route
@@ -1635,7 +1663,7 @@ def add_map_server_options(parser):
         "--listen",
         default=None,
         metavar="HOST",
-        help="地图服务监听地址，默认 127.0.0.1。设为 0.0.0.0 可让同网络的手机访问（会自动启用一次性令牌）",
+        help="网页服务监听地址，默认 127.0.0.1。设为 0.0.0.0 可让同网络的手机访问（会自动启用访问令牌）",
     )
     parser.add_argument(
         "--port",
@@ -1735,6 +1763,11 @@ def build_parser():
         help="仅选点并输出坐标，不自动设置定位",
     )
     add_map_server_options(sub_map)
+
+    # Persistent browser console; one-shot map/route commands remain available.
+    sub_web = subparsers.add_parser("web", help="打开常驻网页控制台")
+    add_common_options(sub_web, for_subcommand=True)
+    add_map_server_options(sub_web)
 
     # simlocation status
     sub_status = subparsers.add_parser("status", help="查看所有设备定位状态")
@@ -1957,15 +1990,15 @@ def cmd_device_list(pmd3_bin, log_path=None):
 def cmd_device_add(alias, udid, pmd3_bin, log_path=None):
     devices_data = read_devices()
     if looks_like_udid(alias):
-        print(f"[!] 别名不能是 UDID 形式: {alias}")
+        log_message(f"[!] 别名不能是 UDID 形式: {alias}")
         sys.exit(1)
     if udid and not looks_like_udid(udid):
-        print(f"[!] UDID 格式不正确: {udid}")
+        log_message(f"[!] UDID 格式不正确: {udid}")
         sys.exit(1)
     if not udid:
         discovered = discover_devices(pmd3_bin, log_path)
         if not discovered:
-            print("[!] 未发现任何设备。请连接设备后重试。")
+            log_message("[!] 未发现任何设备。请连接设备后重试。")
             sys.exit(1)
         if len(discovered) == 1:
             udid = discovered[0]
@@ -1975,21 +2008,21 @@ def cmd_device_add(alias, udid, pmd3_bin, log_path=None):
     devices_data["aliases"][alias] = udid
     write_devices(devices_data)
     if previous and previous != udid:
-        print(f"[*] 别名 {alias} 原先指向 {previous}，已更新。")
-    print(f"[+] 已注册别名: {alias} → {udid}")
+        log_message(f"[*] 别名 {alias} 原先指向 {previous}，已更新。")
+    log_message(f"[+] 已注册别名: {alias} → {udid}")
 
 
 def cmd_device_remove(alias):
     devices_data = read_devices()
     if alias not in devices_data["aliases"]:
-        print(f"[!] 别名不存在: {alias}")
+        log_message(f"[!] 别名不存在: {alias}")
         sys.exit(1)
     del devices_data["aliases"][alias]
     if devices_data.get("default") == alias:
         devices_data["default"] = None
-        print(f"[*] 默认设备已清除（之前指向已删除的别名 {alias}）。")
+        log_message(f"[*] 默认设备已清除（之前指向已删除的别名 {alias}）。")
     write_devices(devices_data)
-    print(f"[+] 已删除别名: {alias}")
+    log_message(f"[+] 已删除别名: {alias}")
 
 
 def cmd_device_default(name=None):
@@ -2000,21 +2033,21 @@ def cmd_device_default(name=None):
             udid = resolve_alias(default, devices_data)
             alias = reverse_alias(udid, devices_data)
             if alias:
-                print(f"[*] 当前默认设备: {alias} ({udid})")
+                log_message(f"[*] 当前默认设备: {alias} ({udid})")
             else:
-                print(f"[*] 当前默认设备: {udid}")
+                log_message(f"[*] 当前默认设备: {udid}")
         else:
-            print("[*] 未设置默认设备。")
+            log_message("[*] 未设置默认设备。")
         return
     udid = resolve_alias(name, devices_data)
     if udid == name and not looks_like_udid(name):
         known = ", ".join(sorted(devices_data["aliases"])) or "无"
-        print(f"[!] 未知的设备别名: {name}（已注册别名: {known}）。")
-        print("    请先执行 simlocation device add 注册别名，或直接传入完整 UDID。")
+        log_message(f"[!] 未知的设备别名: {name}（已注册别名: {known}）。")
+        log_message("    请先执行 simlocation device add 注册别名，或直接传入完整 UDID。")
         sys.exit(1)
     devices_data["default"] = name
     write_devices(devices_data)
-    print(f"[+] 默认设备已设置为: {name}" + (f" ({udid})" if name != udid else ""))
+    log_message(f"[+] 默认设备已设置为: {name}" + (f" ({udid})" if name != udid else ""))
 
 
 def cmd_status(pmd3_bin, log_path=None):
@@ -2220,7 +2253,7 @@ def cmd_clear_all(pmd3_bin, connection_mode="auto", log_path=None):
 if __name__ == "__main__":
     args = parse_args()
 
-    pmd3_bin = resolve_pymobiledevice3(required=args.command != "doctor")
+    pmd3_bin = resolve_pymobiledevice3(required=args.command not in ("doctor", "web"))
     log_path = Path(args.log_file) if args.debug else None
 
     if log_path:
@@ -2258,7 +2291,11 @@ if __name__ == "__main__":
 
     device_flag = getattr(args, "device", None)
 
-    if args.command == "status":
+    if args.command == "web":
+        from simlocation_web import run_web_console
+
+        run_web_console(sys.modules[__name__], args, pmd3_bin)
+    elif args.command == "status":
         cmd_status(pmd3_bin, log_path)
     elif args.command == "doctor":
         doctor_result = cmd_doctor(pmd3_bin, device_flag=device_flag)

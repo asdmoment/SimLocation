@@ -1,14 +1,14 @@
 // Contract tests for map editing and coordinate submission, with map SDK stubs.
 // Ported from hoicau's work in PR #1.
 //
-// Run with: node tests/test_map_routes.js
+// Run with: node tests/test_map_routes.cjs
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { test } = require("node:test");
 
-function loadMap(provider, routeMode, loop = false) {
+function loadMap(provider, routeMode, loop = false, embedded = false) {
   const nodes = new Map();
   function element() {
     return { style: {}, listeners: {}, disabled: false, hidden: true,
@@ -26,7 +26,7 @@ function loadMap(provider, routeMode, loop = false) {
   function layer(options = {}) {
     return { options, position: options.position, listeners: {},
       addTo() { return this; }, setMap() {}, setView() { return this; },
-      setZoomAndCenter() {}, on(name, fn) { this.listeners[name] = fn; },
+      setZoomAndCenter() {}, fitBounds() {}, setFitView() {}, on(name, fn) { this.listeners[name] = fn; },
       clearLayers() {}, bindTooltip() {},
       setPosition(value) { this.position = value; },
       setLatLng(value) { this.position = value; },
@@ -46,7 +46,9 @@ function loadMap(provider, routeMode, loop = false) {
   // confirm handler appends to the POST URL.
   const context = vm.createContext({ document, L, AMap, console, Blob, URL,
     setTimeout() {}, clearTimeout() {}, alert() {},
-    window: { close() {}, location: { search: "" } } });
+    window: { close() {}, listeners: {}, parent: { messages: [], postMessage(message) { this.messages.push(message); } },
+      addEventListener(name, fn) { this.listeners[name] = fn; },
+      location: { search: embedded ? "?embed=1" : "", origin: "http://localhost" } } });
   context.XMLHttpRequest = function () {
     this.open = (method, url) => { context.postedTo = url; };
     this.setRequestHeader = () => {};
@@ -149,3 +151,34 @@ test("Amap converts every route point from GCJ-02 to WGS-84", () => {
   assert.notEqual(points[1][0], 39.919);
   assert.notEqual(points[1][1], 116.407);
 });
+
+for (const provider of ["osm", "amap"]) {
+  test(provider + ": console edits drafts without submitting or freezing the map", () => {
+    const { context, add } = loadMap(provider, true, false, true);
+    const parent = context.window.parent;
+    assert.equal(parent.messages[0].type, "simlocation-map-ready");
+    add(39.909, 116.397); add(39.919, 116.407);
+    assert.equal(parent.messages.at(-1).points.length, 2);
+    assert.equal(context.sent, undefined);
+    assert.equal(context.routeSubmitted, false);
+    const receive = context.window.listeners.message;
+    const message = { type: "simlocation-draft", mode: "route", points: [[39.9, 116.3], [39.91, 116.31]], loop: true, focus: true };
+    receive({ source: parent, origin: "https://wrong.example", data: message });
+    assert.notEqual(context.routePayload().points[0][0], 39.9);
+    const count = parent.messages.length;
+    receive({ source: parent, origin: "http://localhost", data: message });
+    assert.equal(parent.messages.length, count, "restoring must not echo converted coordinates");
+    assert.equal(context.routeLoop, true);
+    const restored = context.routePayload().points;
+    assert.ok(Math.abs(restored[0][0] - 39.9) < 1e-8);
+    assert.ok(Math.abs(restored[1][1] - 116.31) < 1e-8);
+  });
+
+  test(provider + ": console point selection stays editable after successive edits", () => {
+    const { context, add } = loadMap(provider, false, false, true);
+    add(1.2, -103.8); add(1.3, -103.9);
+    const messages = context.window.parent.messages;
+    assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1).points)), [[1.3, -103.9]]);
+    assert.equal(context.sent, undefined);
+  });
+}

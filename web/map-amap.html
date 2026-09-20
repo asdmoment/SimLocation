@@ -329,6 +329,19 @@ function _onAMapLoaded() {
     if (!keyword) return;
     doAmapSearch(keyword);
   });
+  initMapBridge(function (point) {
+    // Invert the existing GCJ conversion so imported WGS-84 routes stay aligned.
+    var lat = point[0], lng = point[1];
+    for (var i = 0; i < 5; i++) {
+      var wgs = GCJ.toWgs84(lng, lat);
+      lat += point[0] - wgs.lat;
+      lng += point[1] - wgs.lng;
+    }
+    return [lat, lng];
+  }, function (point) { placeMarker(point[1], point[0]); }, function (points) {
+    if (routeMode) map.setFitView(routeLayers);
+    else map.setZoomAndCenter(16, [points[0][1], points[0][0]]);
+  });
 }
 
 function placeMarker(lng, lat) {
@@ -341,6 +354,7 @@ function placeMarker(lng, lat) {
 function updateCoords(gcjLng, gcjLat) {
   var wgs = GCJ.toWgs84(gcjLng, gcjLat);
   currentWgs = wgs;
+  notifyMapSelection([wgs.lat, wgs.lng]);
 
   coordsEl.innerHTML =
     '<span class="label">GCJ-02:</span> ' +

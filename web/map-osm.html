@@ -174,8 +174,10 @@ var searchResults = document.getElementById("search-results");
 /* ---- Map init ---- */
 var map = L.map("map").setView([39.909, 116.397], 12);
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
+  // OSM requires a Referer. Send only the origin, never the access token.
+  referrerPolicy: "origin",
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 }).addTo(map);
 
@@ -218,6 +220,7 @@ function placeMarker(lat, lng) {
 
 function updateCoords(lat, lng) {
   currentCoords = { lat: lat, lon: lng };
+  notifyMapSelection([lat, lng]);
 
   coordsEl.innerHTML =
     '<span class="label">WGS-84:</span> ' +
@@ -335,6 +338,12 @@ confirmBtn.addEventListener("click", function () {
     alert("无法连接到本地服务，请检查终端。");
   };
   xhr.send(JSON.stringify(routeMode ? routePayload() : currentCoords));
+});
+initMapBridge(function (point) { return point; }, function (point) {
+  placeMarker(point[0], point[1]);
+}, function (points) {
+  if (points.length === 1) map.setView(points[0], 16);
+  else map.fitBounds(points, { padding: [36, 36], maxZoom: 16 });
 });
 </script>
 
