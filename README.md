@@ -287,7 +287,9 @@ simlocation device remove myphone
 | --- | --- |
 | `SIMLOCATION_DEFAULT_LAT` | 默认纬度 |
 | `SIMLOCATION_DEFAULT_LON` | 默认经度 |
+| `SIMLOCATION_UDID` | 指定目标设备 UDID，等效于每条命令都带 `--device`（`--device` 优先级更高） |
 | `SIMLOCATION_PYTHON` | 指定使用的 Python 解释器路径 |
+| `SIMLOCATION_PMD3` | 指定 `pymobiledevice3` 可执行文件路径（默认优先使用与当前 Python 同目录的那个） |
 | `SIMLOCATION_VAR_DIR` | 自定义运行时数据文件存放目录（默认 `var/`） |
 | `SIMLOCATION_TUNNELD_URL` | 自定义 `tunneld` 服务地址（默认 `http://127.0.0.1:49151`） |
 | `SIMLOCATION_START_TIMEOUT_SECONDS` | 会话启动超时时间（默认 60 秒） |

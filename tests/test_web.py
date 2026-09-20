@@ -53,7 +53,8 @@ class WebConsoleTests(unittest.TestCase):
         connection.request("POST" if body is not None else "GET", path, body, request_headers)
         response = connection.getresponse()
         content = response.read()
-        result = json.loads(content) if response.getheader("Content-Type").startswith("application/json") else content.decode()
+        json_body = content and response.getheader("Content-Type").startswith("application/json")
+        result = json.loads(content) if json_body else content.decode()
         connection.close()
         return response.status, result
 
@@ -77,8 +78,11 @@ class WebConsoleTests(unittest.TestCase):
         self.assertEqual(self.request(headers={"Origin": "https://untrusted.example"})[0], 403)
 
     def test_only_known_assets_and_actions_are_exposed(self):
-        for path in ("/../VERSION", "/var/devices.json", "/api/logs", "/favicon.ico"):
+        for path in ("/../VERSION", "/var/devices.json", "/api/logs", "/console.html"):
             self.assertEqual(self.request(path)[0], 404)
+        # The browser asks for this on every load without a token; answering
+        # 403 would make a working console log an error against itself.
+        self.assertEqual(self.request("/favicon.ico", headers={"X-SimLocation-Token": ""}), (204, ""))
         for data in ({"action": "shell"}, {"action": ["set"]}, [], None):
             status, _ = self.request("/api/action", raw=json.dumps(data))
             self.assertEqual(status, 400)
