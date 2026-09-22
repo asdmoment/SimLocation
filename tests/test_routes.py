@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import math
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -125,6 +126,19 @@ class RouteLoadingTests(unittest.TestCase):
 
 
 class RouteArgumentTests(unittest.TestCase):
+    def test_noise_defaults_and_explicit_options(self):
+        args = cli.parse_args(["route"])
+        self.assertEqual((args.speed_noise, args.position_noise), (0, 0))
+        args = cli.parse_args(["route", "--speed-noise", "15", "--position-noise", "3"])
+        self.assertEqual((args.speed_noise, args.position_noise), (15, 3))
+
+    def test_invalid_noise_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            for flag in ("--speed-noise", "--position-noise"):
+                for value in ("-1", "101", "nan", "inf"):
+                    with self.subTest(flag=flag, value=value), self.assertRaises(SystemExit):
+                        cli.parse_args(["route", flag, value])
+
     def test_shared_options_survive_on_either_side_of_the_subcommand(self):
         args = cli.parse_args(["--device", "phone", "route", "--speed", "8", "--loop"])
         self.assertEqual(
@@ -158,6 +172,7 @@ class RouteSnapshotTests(unittest.TestCase):
                 snapshot = kwargs["route_file"]
                 self.assertEqual(cli.load_route(snapshot, loop=True).points, route.points)
                 self.assertEqual((kwargs["speed_kmh"], kwargs["loop_route"]), (8, True))
+                self.assertEqual((kwargs["speed_noise"], kwargs["position_noise"]), (15, 3))
                 return True
 
             with (
@@ -166,7 +181,8 @@ class RouteSnapshotTests(unittest.TestCase):
                 mock.patch.object(cli, "start_hold_session", side_effect=start),
                 mock.patch.object(cli, "log_message"),
             ):
-                cli.auto_set_route(route, 8, True, "/unused/pmd3", device_flag="phone")
+                cli.auto_set_route(route, 8, True, "/unused/pmd3", device_flag="phone",
+                                   speed_noise=15, position_noise=3)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_snapshot_is_removed_when_the_session_fails_to_start(self):
@@ -220,7 +236,98 @@ class RoutePickerTests(unittest.TestCase):
         self.assertEqual(len(handler.server.picked_coords.points), len(points))
 
 
+class RouteNoiseTests(unittest.TestCase):
+    def test_noise_bounds_continuity_and_nonconstant_values(self):
+        noise = cli.RouteNoise(random.Random(42))
+        samples = [noise.sample(i / 100) for i in range(10001)]
+        for speed, integral, east, north in samples:
+            self.assertLessEqual(abs(speed), 1)
+            self.assertLessEqual(math.hypot(east, north), 1 + 1e-12)
+        for a, b in zip(samples, samples[1:]):
+            self.assertLess(abs(b[0] - a[0]), .004)
+            self.assertLess(math.hypot(b[2] - a[2], b[3] - a[3]), .004)
+        self.assertGreater(max(s[0] for s in samples) - min(s[0] for s in samples), .5)
+
+    def test_integral_matches_numerical_integration_and_skipped_ticks(self):
+        noise = cli.RouteNoise(random.Random(42))
+        previous = noise.sample(0)[0]
+        area = 0
+        for i in range(1, 3726):
+            speed, integral, *_ = noise.sample(i / 100)
+            area += (previous + speed) / 2 * .01
+            previous = speed
+        self.assertAlmostEqual(area, integral, places=5)
+        sparse = cli.RouteNoise(random.Random(42)).sample(37.25)
+        self.assertEqual(sparse, noise.sample(37.25))
+
+    def test_offsets_are_bounded_at_poles_and_antimeridian(self):
+        for point in ((0, 180), (90, 0), (-90, 180), (45, -179.99999)):
+            shifted = cli.offset_coordinate(point, 60, 80)
+            cli.validate_coordinates(*shifted)
+            self.assertAlmostEqual(cli.route_distance(point, shifted), 100, places=5)
+            self.assertEqual(cli.offset_coordinate(point, 0, 0), point)
+
+    def test_child_command_preserves_noise(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "route.json"
+            path.write_text('{"points": [[0, 0], [0, 1]]}')
+            with (
+                mock.patch.object(cli, "RUNTIME_DIR", Path(directory)),
+                mock.patch.object(cli, "stop_hold_session"),
+                mock.patch.object(cli.subprocess, "Popen") as spawn,
+                mock.patch.object(cli, "wait_for_hold_session", return_value=True),
+                mock.patch.object(cli.threading, "Thread"),
+            ):
+                cli.start_hold_session(0, 0, "pmd3", "auto", "phone", route_file=path,
+                                       speed_noise=15, position_noise=3, loop_route=True)
+            args = cli.parse_args(spawn.call_args.args[0][2:])
+            self.assertEqual((args.speed_noise, args.position_noise, args.loop), (15, 3, True))
+
+
 class PlaybackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_noise_changes_playback_with_bounded_offset_and_exact_endpoint(self):
+        for loop in (False, True):
+            route = cli.Route([[0, 0], [0, 0.0003]], loop=loop)
+            stop = asyncio.Event()
+            now, updates, positions = [0.0], [], []
+
+            async def set_position(lat, lon):
+                positions.append((lat, lon))
+                now[0] += .3
+                if (not loop and (lat, lon) == route.points[-1]) or len(positions) >= 90:
+                    stop.set()
+
+            async def wait(waiter, timeout):
+                waiter.close()
+                now[0] += timeout
+                raise asyncio.TimeoutError
+
+            with (
+                mock.patch.object(cli.asyncio, "wait_for", side_effect=wait),
+                mock.patch.object(cli, "write_state", side_effect=lambda p, s: updates.append(s.copy())),
+            ):
+                await cli.play_route(
+                    mock.Mock(set=set_position), route, 3.6, loop, stop, {}, Path("unused"),
+                    clock=lambda: now[0], speed_noise=20, position_noise=3, rng=random.Random(42),
+                )
+            self.assertEqual(positions[0], route.points[0])
+            offsets = []
+            for point, state in zip(positions, updates):
+                offset = cli.route_distance(point, route.position(state["distance_m"]))
+                offsets.append(offset)
+                self.assertLessEqual(offset, 3 + 1e-6)
+                if state["route_phase"] == "moving":
+                    self.assertTrue(2.88 <= state["current_speed_kmh"] <= 4.32)
+            self.assertGreater(max(offsets), .1)
+            self.assertNotEqual(updates[10]["current_speed_kmh"], 3.6)
+            if loop:
+                self.assertGreater(updates[-1]["lap"], 1)
+                self.assertEqual(updates[-1]["route_phase"], "moving")
+            else:
+                self.assertEqual(positions[-1], route.points[-1])
+                self.assertEqual(updates[-1]["route_phase"], "completed")
+                self.assertEqual(updates[-1]["current_speed_kmh"], 0)
+
     async def test_stop_during_the_interval_returns_promptly(self):
         route = cli.Route([[0, 0], [0, 1]])
         stop = asyncio.Event()
@@ -315,6 +422,10 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RouteStatusTests(unittest.TestCase):
+    def test_current_speed_is_shown_when_noise_is_active(self):
+        text = self.describe({"mode": "route", "speed_kmh": 12, "current_speed_kmh": 11.5})
+        self.assertIn("11.5 km/h", text)
+
     def describe(self, extra):
         state = {"status": "ready", "pid": os_pid(), "lat": "1.000000", "lon": "2.000000"}
         state.update(extra)

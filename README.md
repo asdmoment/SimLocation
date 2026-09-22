@@ -158,7 +158,7 @@ simlocation web
 | 网页功能 | 对应 CLI 操作 |
 | --- | --- |
 | 坐标输入 / 搜索选点 / 地图选点 | `set`, `map` |
-| 路线绘制、拖动、撤销、导入、调速及循环 | `route`, `--speed`, `--loop` |
+| 路线绘制、拖动、撤销、导入、调速、随机扰动及循环 | `route`, `--speed`, `--speed-noise`, `--position-noise`, `--loop` |
 | 导出坐标 / 路线 JSON | `map --pick-only`, `route --pick-only` |
 | 清除单台或全部设备定位 | `clear`, `clear --all` |
 | 设备列表 / 轨迹状态监视 | `device list`, `status` |
@@ -206,6 +206,9 @@ simlocation route
 simlocation route my-route.json
 simlocation route track.gpx --speed 12 --loop
 
+# 基准速度 8 km/h，速度波动最多 ±15%，位置偏移最多 3 m
+simlocation route track.gpx --speed 8 --speed-noise 15 --position-noise 3
+
 # 手机远程绘制路线
 simlocation route --remote --speed 12
 
@@ -214,8 +217,14 @@ simlocation route --remote --speed 12
 #### 参数说明
 
 * `--speed N`：移动速度（km/h，默认 5）。
+* `--speed-noise N`：相对基准速度的波动上限（±百分比，0–100，默认 0）。例如速度 8、波动 15 时，沿原路线推进速度在 6.8–9.2 km/h 内变化。
+* `--position-noise N`：相对原路线当前位置的偏移半径上限（米，0–100，默认 0）。
 * `--loop`：到达终点后循环回起点。
 * `--pick-only`：仅导出路线 JSON。
+
+两种扰动可以独立启用，每次播放重新随机生成。随机目标每 10 秒更新一次，期间平滑过渡；速度按实际经过时间积分，设备通信延迟不会累积减慢播放。位置扰动模拟平滑漂移，可能偏离道路；它也会影响 App 根据坐标计算的速度。`status` 和网页显示的速度是沿原路线的推进速度，进度和预计用时也以原路线为准。
+
+起点附近的位置偏移逐渐增加，非循环路线接近终点时逐渐归零，最后精确保持原始终点。循环经过起点时扰动连续。网页控制台在「运动轨迹 → 随机扰动」中设置，参数随草稿保留。地图和导出的 JSON 保留原始路线，扰动仅在播放时生成；`--pick-only` 不生成带扰动的轨迹。
 
 #### 路线 JSON 格式
 

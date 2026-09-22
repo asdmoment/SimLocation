@@ -110,8 +110,14 @@ class WebConsole:
             loop = data.get("loop", False)
             if not isinstance(loop, bool):
                 raise ValueError("loop 必须为布尔值。")
+            speed_noise = data.get("speed_noise", 0.0)
+            position_noise = data.get("position_noise", 0.0)
+            cli.validate_route_noise(speed_noise, position_noise)
             route = cli.Route(data.get("points"), loop=loop)
-            callback = lambda: cli.auto_set_route(route, speed, loop, self.pmd3_bin, **options)
+            callback = lambda: cli.auto_set_route(
+                route, speed, loop, self.pmd3_bin, **options,
+                speed_noise=speed_noise, position_noise=position_noise,
+            )
         elif action == "clear":
             callback = lambda: cli.clear_location(self.pmd3_bin, **options)
         elif action == "clear_all":
