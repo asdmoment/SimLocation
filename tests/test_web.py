@@ -101,6 +101,14 @@ class WebConsoleTests(unittest.TestCase):
         for speed in (0, -1, 1001, True, "5", float("nan")):
             self.assertEqual(self.operation("route", device=PHONE, points=[[1, 2], [2, 3]], speed=speed)[0], 400)
         self.assertEqual(self.operation("route", device=PHONE, points=[[1, 2]], speed=5)[0], 400)
+        with patch.object(cli, "auto_set_route") as apply_route:
+            for field in ("speed_noise", "position_noise"):
+                for value in (-1, 101, 10**400, True, "5", None, float("nan"), float("inf")):
+                    with self.subTest(field=field, value=value):
+                        self.assertEqual(self.operation(
+                            "route", device=PHONE, points=[[1, 2], [2, 3]], **{field: value}
+                        )[0], 400)
+            apply_route.assert_not_called()
         self.assertEqual(self.operation("clear_all")[0], 400)
         self.assertIsNone(self.app.job)
 
@@ -149,12 +157,14 @@ class WebConsoleTests(unittest.TestCase):
             self.assertEqual(route["points"], [[1, 2], [2, 3]])
             self.assertIsNone(self.app.job)
         with patch.object(cli, "auto_set_route", return_value=None) as apply:
-            self.operation("route", device=PHONE, points=route["points"], speed=12, loop=True)
+            self.operation("route", device=PHONE, points=route["points"], speed=12, loop=True,
+                           speed_noise=15, position_noise=3)
             self.app.close()
             args, kwargs = apply.call_args
             self.assertEqual(args[0].points, [(1, 2), (2, 3), (1, 2)])
             self.assertEqual(args[1:3], (12, True))
             self.assertEqual(kwargs["udid"], PHONE)
+            self.assertEqual((kwargs["speed_noise"], kwargs["position_noise"]), (15, 3))
         self.assertFalse(list(self.root.glob("route-*")))
 
     def test_route_import_rejects_entities_oversize_and_bad_json(self):

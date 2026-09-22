@@ -48,7 +48,7 @@
 - Open the persistent browser console: `bin/simlocation web` (or `web --remote --port 8765`)
 - Set a simulated location: `bin/simlocation set <lat> <lon>` (legacy `bin/simlocation <lat> <lon>` still works)
 - Clear simulated location: `bin/simlocation clear` (legacy `bin/simlocation --clear` still works)
-- Replay a moving route: `bin/simlocation route [file] [--speed KMH] [--loop]`; omit the file to draw one on the map
+- Replay a moving route: `bin/simlocation route [file] [--speed KMH] [--speed-noise PERCENT] [--position-noise METERS] [--loop]`; omit the file to draw one on the map
 - Target a device: add `--device <alias|UDID>` before or after the subcommand
 - Launcher help check when deps are installed: `bin/simlocation --help`; version: `bin/simlocation --version`
 - CLI help check when Python deps are installed: `python3 bin/simlocation.py --help`
@@ -146,6 +146,12 @@
 - Only call tunneld `/cancel` after every tunnel registered for the device failed its reachability probe: `/start-tunnel` hands back a registered tunnel without checking it, so a dead one can only be replaced once cancelled.
 - Request a new tunnel with an explicit `connection_type`, one transport at a time (`usbmux`, then `wifi`), and never re-send a request that timed out: the tunnel task keeps running inside tunneld and overlapping requests race in it. A plain `/start-tunnel?udid=` burns its whole timeout in a bonjour scan when the device's tunnel is dead.
 - Only use RSD tunnels registered under the target UDID; do not fall back to another device's tunnel.
+
+## Route Playback Noise
+
+- Speed noise is a bounded percentage of the base speed; position noise is a bounded offset radius in meters. Both default to zero and are validated before device work.
+- Preserve elapsed-time integration, smooth loop continuity, and the exact held endpoint. Keep source/exported waypoints unchanged.
+- `tests/test_routes.py` covers noise bounds, continuity, integration, spherical offsets, worker arguments, and playback; `tests/test_web.py` covers API validation and propagation.
 
 ## User-Facing Text
 

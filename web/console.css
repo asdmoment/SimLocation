@@ -49,6 +49,10 @@ main { display: grid; grid-template-columns: 370px minmax(0, 1fr); height: calc(
 .route-tools button { flex: 1; font-size: 12px; padding: 8px; }
 .route-options { justify-content: space-between; margin-top: 20px; }
 .route-options > label:first-child { width: 120px; }
+.noise-options { margin-top: 16px; font-size: 12px; }
+.noise-options summary { padding: 8px 0; }
+.noise-options summary span { float: right; }
+.noise-options .coordinate-fields { margin: 8px 0; }
 .checkbox { display: flex; align-items: center; gap: 7px; }
 .options { margin-top: 22px; color: var(--muted); font-size: 12px; }
 .options summary { padding: 8px 0; }

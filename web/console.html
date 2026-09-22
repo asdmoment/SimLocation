@@ -52,6 +52,14 @@
           </div>
           <div class="row route-options"><label for="speed">速度 <span class="muted">km/h</span><input id="speed" type="number" min="0.001" max="1000" step="any" value="5" required></label>
             <label class="checkbox"><input id="loop" type="checkbox">循环移动</label></div>
+          <details class="noise-options">
+            <summary>随机扰动 <span class="muted" id="noise-summary">关闭</span></summary>
+            <div class="coordinate-fields">
+              <label for="speed-noise">速度波动 <span class="muted">± %</span><input id="speed-noise" type="number" min="0" max="100" step="any" value="0" required></label>
+              <label for="position-noise">位置偏移上限 <span class="muted">m</span><input id="position-noise" type="number" min="0" max="100" step="any" value="0" required></label>
+            </div>
+            <p class="note">0 表示关闭。扰动平滑变化，位置偏移可能离开道路；到终点后保持原始终点。</p>
+          </details>
           <p class="note" id="route-hint">途经点之间沿大圆路径移动，到达终点后保持定位。</p>
           <button id="start-route" class="primary full" type="button" data-operation>开始移动</button>
         </section>
