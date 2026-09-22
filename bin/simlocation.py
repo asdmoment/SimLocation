@@ -9,6 +9,7 @@ import ipaddress
 import json
 import math
 import os
+import random
 import re
 import secrets
 import signal
@@ -93,6 +94,7 @@ MAX_ROUTE_POINTS = 10000
 MAX_ROUTE_BYTES = 4 * 1024 * 1024
 EARTH_RADIUS_METERS = 6371008.8
 DEFAULT_ROUTE_SPEED_KMH = 5.0
+ROUTE_NOISE_INTERVAL_SECONDS = 10.0
 
 DEFAULT_DEVICES_PATH = RUNTIME_DIR / "devices.json"
 # Capture web job messages without redirecting stdout across HTTP threads.
@@ -236,6 +238,74 @@ class Route:
             for axis in range(3)
         )
         return math.degrees(math.atan2(z, math.hypot(x, y))), math.degrees(math.atan2(y, x))
+
+
+def validate_route_noise(speed_noise, position_noise):
+    """Validate playback options before any session is replaced."""
+    for name, value, unit in (
+        ("speed-noise", speed_noise, "%"),
+        ("position-noise", position_noise, "m"),
+    ):
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not 0 <= value <= 100 or not math.isfinite(value)
+        ):
+            raise ValueError(f"{name} 必须为 0 到 100 {unit} 的有限数字。")
+
+
+class RouteNoise:
+    """Smooth bounded random targets, with an exact elapsed-time speed integral.
+
+    Each ten-second interval uses smoothstep interpolation. Integrating that
+    curve keeps distance independent of DVT latency and polling frequency.
+    Samples must be requested in monotonic elapsed-time order.
+    """
+
+    def __init__(self, rng=None):
+        self.rng = rng if rng is not None else random.Random()
+        self.start = 0.0
+        self.integral = 0.0
+        self.previous = (0.0, 0.0, 0.0)
+        self.target = self.random_target()
+
+    def random_target(self):
+        radius = math.sqrt(self.rng.random())
+        angle = self.rng.uniform(0, 2 * math.pi)
+        return self.rng.uniform(-1, 1), radius * math.cos(angle), radius * math.sin(angle)
+
+    def sample(self, elapsed):
+        interval = ROUTE_NOISE_INTERVAL_SECONDS
+        while elapsed >= self.start + interval:
+            self.integral += interval * (self.previous[0] + self.target[0]) / 2
+            self.start += interval
+            self.previous = self.target
+            self.target = self.random_target()
+        t = (elapsed - self.start) / interval
+        weight = t * t * (3 - 2 * t)
+        speed, east, north = (
+            a + (b - a) * weight for a, b in zip(self.previous, self.target)
+        )
+        integral = self.integral + interval * (
+            self.previous[0] * t + (self.target[0] - self.previous[0]) * (t**3 - t**4 / 2)
+        )
+        return speed, integral, east, north
+
+
+def offset_coordinate(point, east_m, north_m):
+    """Move in the local tangent plane, retaining valid coordinates at the poles."""
+    distance = math.hypot(east_m, north_m)
+    if not distance:
+        return point
+    lat, lon = map(math.radians, point)
+    radial = (math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat))
+    east = (-math.sin(lon), math.cos(lon), 0)
+    north = (-math.sin(lat) * math.cos(lon), -math.sin(lat) * math.sin(lon), math.cos(lat))
+    angle = distance / EARTH_RADIUS_METERS
+    x, y, z = (
+        math.cos(angle) * r + math.sin(angle) * (east_m * e + north_m * n) / distance
+        for r, e, n in zip(radial, east, north)
+    )
+    return math.degrees(math.atan2(z, math.hypot(x, y))), math.degrees(math.atan2(y, x))
 
 
 def parse_gpx_points(data):
@@ -996,21 +1066,28 @@ async def clear_held_location(simulation, state_path):
 
 async def play_route(
     simulation, route, speed_kmh, loop_route, stop_event, state, state_path,
-    clock=time.monotonic,
+    clock=time.monotonic, *, speed_noise=0.0, position_noise=0.0, rng=None,
 ):
-    """Walk the route at speed_kmh, pushing a coordinate every tick.
-
-    Position is derived from elapsed wall time rather than accumulated per-tick
-    steps, so a slow DVT round-trip makes the next update jump ahead instead of
-    letting the simulated device fall progressively behind schedule.
-    """
+    """Walk using elapsed time, optionally varying speed and position smoothly."""
+    validate_route_noise(speed_noise, position_noise)
+    noise = RouteNoise(rng) if speed_noise or position_noise else None
     started = clock()
     while not stop_event.is_set():
-        traveled_m = (clock() - started) * speed_kmh / 3.6
+        elapsed = clock() - started
+        variation, integral, east, north = noise.sample(elapsed) if noise else (0, 0, 0, 0)
+        traveled_m = (elapsed + speed_noise / 100 * integral) * speed_kmh / 3.6
         distance_m = traveled_m % route.total_m if loop_route else min(traveled_m, route.total_m)
         lat, lon = route.position(distance_m)
-        await simulation.set(lat, lon)
         completed = not loop_route and traveled_m >= route.total_m
+        # Fade at the start and the held endpoint; loop boundaries stay continuous.
+        fade_m = max(10.0, position_noise)
+        fade = min(1.0, traveled_m / fade_m)
+        if not loop_route:
+            fade = min(fade, (route.total_m - distance_m) / fade_m)
+        lat, lon = offset_coordinate(
+            (lat, lon), east * position_noise * fade, north * position_noise * fade,
+        )
+        await simulation.set(lat, lon)
         state.update(
             # ~0.1 m of precision: the state file is read by humans and by
             # `status`, and full float repr makes the device table unreadable.
@@ -1020,6 +1097,7 @@ async def play_route(
             distance_m=distance_m,
             progress=distance_m / route.total_m,
             lap=int(traveled_m // route.total_m) + 1 if loop_route else 1,
+            current_speed_kmh=0.0 if completed else speed_kmh * (1 + speed_noise / 100 * variation),
         )
         write_state(state_path, state)
         if completed:
@@ -1034,6 +1112,7 @@ async def play_route(
 async def _hold_dvt_location_session(
     rsd_pair, lat, lon, state_path, log_path=None, stop_event=None,
     *, route=None, speed_kmh=DEFAULT_ROUTE_SPEED_KMH, loop_route=False,
+    speed_noise=0.0, position_noise=0.0,
 ):
     if stop_event is None:
         stop_event = asyncio.Event()
@@ -1069,6 +1148,8 @@ async def _hold_dvt_location_session(
                         mode="route",
                         route_phase="moving",
                         speed_kmh=speed_kmh,
+                        speed_noise=speed_noise,
+                        position_noise=position_noise,
                         loop=loop_route,
                         total_m=route.total_m,
                         distance_m=0.0,
@@ -1086,6 +1167,7 @@ async def _hold_dvt_location_session(
                         await play_route(
                             simulation, route, speed_kmh, loop_route,
                             stop_event, state, state_path,
+                            speed_noise=speed_noise, position_noise=position_noise,
                         )
                     else:
                         log_message(
@@ -1107,6 +1189,7 @@ async def _hold_dvt_location_session(
 def run_hold_session(
     lat, lon, pmd3_bin, connection_mode, pid_path, state_path, log_path=None,
     *, route=None, speed_kmh=DEFAULT_ROUTE_SPEED_KMH, loop_route=False,
+    speed_noise=0.0, position_noise=0.0,
 ):
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1132,6 +1215,7 @@ def run_hold_session(
             _hold_dvt_location_session(
                 rsd_pair, lat, lon, state_path, log_path,
                 route=route, speed_kmh=speed_kmh, loop_route=loop_route,
+                speed_noise=speed_noise, position_noise=position_noise,
             )
         )
         state = read_state(state_path) or {}
@@ -1158,6 +1242,7 @@ def run_hold_session(
 def start_hold_session(
     lat, lon, pmd3_bin, connection_mode, udid, log_path=None,
     *, route_file=None, speed_kmh=DEFAULT_ROUTE_SPEED_KMH, loop_route=False,
+    speed_noise=0.0, position_noise=0.0,
 ):
     try:
         timeout_seconds = get_hold_start_timeout_seconds()
@@ -1183,7 +1268,9 @@ def start_hold_session(
     if log_path:
         cmd.extend(["--debug", "--log-file", str(log_path)])
     if route_file:
-        cmd.extend(["route", str(route_file), "--speed", repr(float(speed_kmh))])
+        cmd.extend(["route", str(route_file), "--speed", repr(float(speed_kmh)),
+                    "--speed-noise", repr(float(speed_noise)),
+                    "--position-noise", repr(float(position_noise))])
         if loop_route:
             cmd.append("--loop")
     else:
@@ -1232,8 +1319,9 @@ def auto_set_location(
 
 def auto_set_route(
     route, speed_kmh, loop_route, pmd3_bin, connection_mode="auto", log_path=None,
-    udid=None, device_flag=None,
+    udid=None, device_flag=None, *, speed_noise=0.0, position_noise=0.0,
 ):
+    validate_route_noise(speed_noise, position_noise)
     if not udid:
         udid = resolve_device_udid(pmd3_bin, log_path, device_flag=device_flag)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -1257,6 +1345,7 @@ def auto_set_route(
         if start_hold_session(
             *route.points[0], pmd3_bin, connection_mode, udid, log_path,
             route_file=snapshot, speed_kmh=speed_kmh, loop_route=loop_route,
+            speed_noise=speed_noise, position_noise=position_noise,
         ):
             log_message("[+] 运动轨迹已启动，用 status 查看进度，clear 结束。", log_path)
             return
@@ -1741,6 +1830,14 @@ def build_parser():
         help=f"移动速度，单位 km/h，默认 {DEFAULT_ROUTE_SPEED_KMH:g}（约等于步行）",
     )
     sub_route.add_argument(
+        "--speed-noise", type=float, default=0.0,
+        help="速度平滑波动上限，±百分比（0–100，默认 0）",
+    )
+    sub_route.add_argument(
+        "--position-noise", type=float, default=0.0,
+        help="轨迹平滑位置偏移上限，单位 m（0–100，默认 0）",
+    )
+    sub_route.add_argument(
         "--loop", action="store_true", help="到终点后连回起点，循环移动",
     )
     sub_route.add_argument(
@@ -1888,6 +1985,10 @@ def parse_args(argv=None):
     if args.command == "route":
         if not math.isfinite(args.speed) or not 0 < args.speed <= 1000:
             parser.error("--speed 必须大于 0 且不超过 1000 km/h。")
+        try:
+            validate_route_noise(args.speed_noise, args.position_noise)
+        except ValueError as exc:
+            parser.error(str(exc))
         if args.pick_only and args.file:
             parser.error("--pick-only 只用于在地图上绘制路线，不能同时给出路线文件。")
         if args._hold_session and not args.file:
@@ -1943,7 +2044,7 @@ def describe_session_state(state):
                 return f"已到终点，保持定位 ({lat}, {lon})"
             moving = (
                 f"移动中 {state.get('progress', 0):.0%} "
-                f"{state.get('speed_kmh', 0):g} km/h ({lat}, {lon})"
+                f"{state.get('current_speed_kmh', state.get('speed_kmh', 0)):g} km/h ({lat}, {lon})"
             )
             if state.get("loop"):
                 moving += f" 第 {state.get('lap', 1)} 圈"
@@ -2286,6 +2387,8 @@ if __name__ == "__main__":
             route=route,
             speed_kmh=getattr(args, "speed", DEFAULT_ROUTE_SPEED_KMH),
             loop_route=getattr(args, "loop", False),
+            speed_noise=getattr(args, "speed_noise", 0.0),
+            position_noise=getattr(args, "position_noise", 0.0),
         )
         sys.exit(0)
 
@@ -2376,6 +2479,8 @@ if __name__ == "__main__":
                 args.connection,
                 log_path,
                 device_flag=device_flag,
+                speed_noise=args.speed_noise,
+                position_noise=args.position_noise,
             )
     elif args.command == "set":
         auto_set_location(

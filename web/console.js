@@ -85,7 +85,8 @@ function validPoints(value) {
 function saveDraft() {
   try {
     sessionStorage.setItem("simlocation-draft", JSON.stringify({ point, points,
-      speed: $("speed").value, loop: $("loop").checked }));
+      speed: $("speed").value, loop: $("loop").checked,
+      speedNoise: $("speed-noise").value, positionNoise: $("position-noise").value }));
   } catch (_error) { /* The editor still works when browser storage is disabled. */ }
 }
 
@@ -97,6 +98,10 @@ function restoreDraft() {
     if (validPoints(draft.points)) points = draft.points;
     if (Number(draft.speed) > 0 && Number(draft.speed) <= 1000) $("speed").value = draft.speed;
     $("loop").checked = draft.loop === true;
+    for (const [key, id] of [["speedNoise", "speed-noise"], ["positionNoise", "position-noise"]]) {
+      const value = Number(draft[key]);
+      if (Number.isFinite(value) && value >= 0 && value <= 100) $(id).value = value;
+    }
     fillPoint();
   } catch (_error) { /* Ignore old or incomplete drafts. */ }
 }
@@ -115,6 +120,9 @@ function readPoint() {
 function updateDraft() {
   const meters = routeDistance(points, $("loop").checked);
   const speed = Number($("speed").value);
+  const speedNoise = Number($("speed-noise").value), positionNoise = Number($("position-noise").value);
+  $("noise-summary").textContent = !$("speed-noise").checkValidity() || !$("position-noise").checkValidity() ?
+    "请填写 0–100" : speedNoise || positionNoise ? `±${speedNoise}% / ${positionNoise} m` : "关闭";
   $("route-distance").replaceChildren(document.createTextNode((meters / 1000).toFixed(2) + " "));
   const unit = document.createElement("small"); unit.textContent = "km"; $("route-distance").appendChild(unit);
   $("route-estimate").textContent = points.length < 2 ? "至少选择两个途经点" :
@@ -161,7 +169,8 @@ function updateButtons() {
   document.querySelectorAll("[data-operation]").forEach(button => { button.disabled = locked; });
   const device = targetDevice();
   for (const id of ["set-location", "clear-location", "set-default"]) $(id).disabled = locked || !device;
-  $("start-route").disabled = locked || !device || routeDistance(points, $("loop").checked) <= .001 || !$("speed").checkValidity();
+  $("start-route").disabled = locked || !device || routeDistance(points, $("loop").checked) <= .001 ||
+    ["speed", "speed-noise", "position-noise"].some(id => !$(id).checkValidity());
   $("alias-form").querySelector("button").disabled = locked || !device;
   $("clear-all").disabled = locked || !(snapshot && snapshot.devices.some(d => d.state.status === "ready"));
 }
@@ -317,11 +326,13 @@ $("point-form").onsubmit = event => {
 for (const id of ["latitude", "longitude"]) $(id).oninput = () => { point = readPoint(); updateDraft(); sendDraft(true); };
 $("save-point").onclick = () => { if (point.length) download("location.json", { lat: point[0][0], lon: point[0][1] }); };
 $("speed").oninput = updateDraft;
+$("speed-noise").oninput = $("position-noise").oninput = updateDraft;
 $("loop").onchange = () => { updateDraft(); sendDraft(); };
 $("route-undo").onclick = () => { points.pop(); updateDraft(); sendDraft(); };
 $("route-reset").onclick = () => { points = []; updateDraft(); sendDraft(); };
 $("route-export").onclick = () => download("route.json", { points });
-$("start-route").onclick = () => perform("route", { points, speed: Number($("speed").value), loop: $("loop").checked });
+$("start-route").onclick = () => perform("route", { points, speed: Number($("speed").value), loop: $("loop").checked,
+  speed_noise: Number($("speed-noise").value), position_noise: Number($("position-noise").value) });
 $("route-import").onclick = () => $("route-file").click();
 $("route-file").onchange = async () => {
   const file = $("route-file").files[0];
