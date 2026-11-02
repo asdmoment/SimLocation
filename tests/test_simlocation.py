@@ -479,6 +479,76 @@ class HoldSessionStopTests(unittest.IsolatedAsyncioTestCase):
         simulation.clear.assert_not_awaited()
 
 
+class DeveloperImageTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def rsd(services):
+        rsd = Mock()
+        rsd.peer_info = {"Properties": {}, "Services": {name: {"Port": "1"} for name in services}}
+        cm = Mock()
+        cm.__aenter__ = AsyncMock(return_value=rsd)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return rsd, cm
+
+    async def test_mounts_only_when_dvt_is_missing(self):
+        with patch.object(simlocation, "auto_mount", AsyncMock()) as mount, patch.object(simlocation, "log_message"):
+            self.assertFalse(await simlocation.mount_developer_image_if_missing(self.rsd([simlocation.DVT_RSD_SERVICE])[0]))
+            self.assertFalse(await simlocation.mount_developer_image_if_missing(Mock()), "no handshake data: leave it")
+            mount.assert_not_awaited()
+            bare = self.rsd(["com.apple.mobile.lockdown.remote.trusted"])[0]
+            self.assertTrue(await simlocation.mount_developer_image_if_missing(bare))
+            mount.assert_awaited_once_with(bare)
+            mount.side_effect = simlocation.AlreadyMountedError()
+            self.assertFalse(await simlocation.mount_developer_image_if_missing(bare))
+            mount.side_effect = OSError("tss unreachable")
+            with self.assertRaisesRegex(RuntimeError, "先解锁一次"):
+                await simlocation.mount_developer_image_if_missing(bare)
+
+    async def test_reconnects_after_mounting_so_dvt_is_listed(self):
+        before, before_cm = self.rsd([])
+        after, after_cm = self.rsd([simlocation.DVT_RSD_SERVICE])
+        with (
+            patch.object(simlocation, "RemoteServiceDiscoveryService", side_effect=[before_cm, after_cm]) as connect,
+            patch.object(simlocation, "auto_mount", AsyncMock()) as mount,
+            patch.object(simlocation, "log_message"),
+        ):
+            async with simlocation.developer_rsd(("fd00::1", "58783")) as rsd:
+                self.assertIs(rsd, after)
+        mount.assert_awaited_once_with(before)
+        self.assertEqual(connect.call_args_list, [call(("fd00::1", 58783))] * 2)
+        before_cm.__aexit__.assert_awaited_once()
+
+
+class TcpKeepaliveTests(unittest.TestCase):
+    def test_parse_accepts_three_bounded_integers(self):
+        self.assertIsNone(simlocation.parse_tcp_keepalive(None))
+        self.assertIsNone(simlocation.parse_tcp_keepalive("  "))
+        self.assertEqual(simlocation.parse_tcp_keepalive(" 30,30,40 "), (30, 30, 40))
+        for bad in ("30,30", "30,30,40,1", "a,b,c", "0,30,40", "30,601,40", "30,30,101", "-1,1,1"):
+            with self.assertRaises(ValueError, msg=bad):
+                simlocation.parse_tcp_keepalive(bad)
+
+    def test_apply_replaces_upstream_schedule_once(self):
+        from pymobiledevice3 import service_connection
+
+        calls = []
+        fake = Mock()
+        fake.set_keepalive = lambda sock, *args: calls.append(args)
+        sock = Mock()
+        with (
+            patch.object(service_connection, "OSUTIL", fake),
+            patch.dict(os.environ, {"SIMLOCATION_TCP_KEEPALIVE": "30,30,40"}),
+            patch.object(simlocation, "log_message"),
+        ):
+            self.assertEqual(simlocation.apply_tcp_keepalive(), (30, 30, 40))
+            simlocation.apply_tcp_keepalive()  # a second call must not wrap the wrapper
+            fake.set_keepalive(sock)
+        self.assertEqual(calls, [(30, 30, 40)])
+        if hasattr(socket, "TCP_USER_TIMEOUT"):
+            sock.setsockopt.assert_called_once_with(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 1_230_000)
+        with patch.dict(os.environ, {"SIMLOCATION_TCP_KEEPALIVE": ""}):
+            self.assertIsNone(simlocation.apply_tcp_keepalive())
+
+
 class HoldSessionTests(unittest.TestCase):
     def test_persistent_parent_reaps_stopped_session_without_another_spawn(self):
         # Use a real OS child: polling it here would hide the zombie bug.

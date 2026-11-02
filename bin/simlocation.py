@@ -22,7 +22,7 @@ import unicodedata
 import webbrowser
 import xml.etree.ElementTree as ET
 from bisect import bisect_right
-from contextlib import redirect_stderr, suppress
+from contextlib import asynccontextmanager, redirect_stderr, suppress
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlsplit, parse_qs, quote
@@ -53,6 +53,8 @@ except ImportError:
     from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import (
         DvtSecureSocketProxyService,
     )
+from pymobiledevice3.exceptions import AlreadyMountedError
+from pymobiledevice3.services.mobile_image_mounter import auto_mount
 
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_DIR = (
@@ -1021,6 +1023,93 @@ def is_rsd_reachable(host, port, log_path=None, quiet=False):
     return False
 
 
+DVT_RSD_SERVICE = "com.apple.instruments.dtservicehub"
+TCP_KEEPALIVE_LIMITS = {"idle": (1, 7200), "interval": (1, 600), "count": (1, 100)}
+
+
+async def mount_developer_image_if_missing(rsd, log_path=None):
+    """Mount the developer disk image when the RSD handshake lists no DVT service.
+
+    A phone reboot unmounts it. On iOS 27 pymobiledevice3 installs the Cryptex1 image through
+    the same RSD tunnel, downloaded and personalized on this host, so a VPS can restore it
+    without a Mac. Returns True when it mounted one.
+    """
+    peer_info = getattr(rsd, "peer_info", None)
+    services = peer_info.get("Services") if isinstance(peer_info, dict) else None
+    if not isinstance(services, dict) or DVT_RSD_SERVICE in services:
+        return False
+    log_message("[*] 手机上没有挂载开发者镜像（手机重启后会卸载），正在自动挂载，首次需要下载，可能要一两分钟…", log_path)
+    try:
+        await auto_mount(rsd)
+    except AlreadyMountedError:
+        return False
+    except Exception as exc:
+        raise RuntimeError(
+            f"自动挂载开发者镜像失败：{exc}。手机重启后要先解锁一次；仍失败可以用 USB 连 Mac 后再试。"
+        ) from exc
+    log_message("[+] 开发者镜像已挂载。", log_path)
+    return True
+
+
+@asynccontextmanager
+async def developer_rsd(rsd_pair, log_path=None):
+    """RSD connection that offers DVT, mounting the developer disk image first if needed."""
+    address = (rsd_pair[0], int(rsd_pair[1]))
+    async with RemoteServiceDiscoveryService(address) as rsd:
+        if not await mount_developer_image_if_missing(rsd, log_path):
+            yield rsd
+            return
+    # The service list comes with the handshake, so DVT only shows up on a new connection.
+    async with RemoteServiceDiscoveryService(address) as rsd:
+        yield rsd
+
+
+def parse_tcp_keepalive(value):
+    """SIMLOCATION_TCP_KEEPALIVE "idle,interval,count" in seconds, or None when unset."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    parts = value.split(",")
+    try:
+        numbers = tuple(int(part) for part in parts)
+    except ValueError:
+        numbers = ()
+    if len(numbers) != 3 or not all(
+        low <= number <= high for number, (low, high) in zip(numbers, TCP_KEEPALIVE_LIMITS.values())
+    ):
+        raise ValueError("SIMLOCATION_TCP_KEEPALIVE 需要「空闲秒,间隔秒,次数」三个正整数，例如 30,30,40")
+    return numbers
+
+
+def apply_tcp_keepalive(log_path=None):
+    """Give this process's device sockets (DVT and friends) a longer keepalive.
+
+    pymobiledevice3 drops a connection after about 12 s without an answer. On a phone that
+    has moved to cellular the session cannot be rebuilt (iOS refuses new pairing connections
+    there), so a short stall would end the simulation for good.
+    """
+    settings = parse_tcp_keepalive(os.environ.get("SIMLOCATION_TCP_KEEPALIVE"))
+    if settings is None:
+        return None
+    from pymobiledevice3 import service_connection
+
+    osutil = service_connection.OSUTIL
+    original = getattr(osutil.set_keepalive, "simlocation_original", osutil.set_keepalive)
+    idle, interval, count = settings
+
+    def set_keepalive(sock, *_args, **_kwargs):
+        original(sock, idle, interval, count)
+        user_timeout = getattr(socket, "TCP_USER_TIMEOUT", None)
+        if user_timeout is not None:
+            # Data waiting for an ACK is governed by retransmission, not keepalive.
+            sock.setsockopt(socket.IPPROTO_TCP, user_timeout, (idle + interval * count) * 1000)
+
+    set_keepalive.simlocation_original = original
+    osutil.set_keepalive = set_keepalive
+    log_message(f"[*] 设备连接 keepalive：空闲 {idle}s，间隔 {interval}s，{count} 次。", log_path)
+    return settings
+
+
 async def _execute_dvt_location_action(rsd_pair, action, lat=None, lon=None):
     async with RemoteServiceDiscoveryService((rsd_pair[0], int(rsd_pair[1]))) as rsd:
         async with DvtSecureSocketProxyService(rsd) as dvt:
@@ -1127,7 +1216,7 @@ async def _hold_dvt_location_session(
         except NotImplementedError:
             signal.signal(sig, lambda *_: request_stop())
 
-    async with RemoteServiceDiscoveryService((rsd_pair[0], int(rsd_pair[1]))) as rsd:
+    async with developer_rsd(rsd_pair, log_path) as rsd:
         async with DvtSecureSocketProxyService(rsd) as dvt:
             async with LocationSimulation(dvt) as simulation:
                 if stop_event.is_set():
@@ -1206,6 +1295,7 @@ def run_hold_session(
     )
 
     try:
+        apply_tcp_keepalive(log_path)
         udid = resolve_device_udid(pmd3_bin, log_path)
         rsd_pair = acquire_rsd(udid, connection_mode, log_path)
         if not rsd_pair:

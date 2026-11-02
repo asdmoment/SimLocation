@@ -27,6 +27,8 @@ CONNECT_TIMEOUT = 12
 SETUP_TIMEOUT = 25
 RETRY_MIN = 5
 RETRY_MAX = 30
+# Where iOS 27 puts the RemotePairing listener (tailnet-tunnel.py scans the same range).
+PORT_SCAN = range(49152, 49168)
 LOG = logging.getLogger('simlocation.network')
 TUN_INTERFACE = 'simloc-rsd'
 # Linux values; the adapter only runs on Linux, the fallbacks keep tests importable elsewhere.
@@ -130,6 +132,35 @@ class DirectCore(TunneldCore):
         super().__init__(protocol=TunnelProtocol.TCP, wifi_monitor=True,
                          usb_monitor=False, usbmux_monitor=False, mobdev2_monitor=False)
         self.config = config
+        self.port = config.get('port', PORT_SCAN[0])
+
+    async def connect_peer(self):
+        """Verify trust on the last port that answered, then on the rest of PORT_SCAN.
+
+        Only a refusal moves on: the listener may come back on another port after a reboot.
+        A timeout means the phone is not reachable at all, and scanning would only multiply
+        the wait. On cellular every port refuses, which the caller logs as before.
+        """
+        ports = [self.port, *(port for port in PORT_SCAN if port != self.port)]
+        for index, port in enumerate(ports):
+            service = DirectProvider({**self.config, 'port': port})
+            try:
+                async with asyncio.timeout(CONNECT_TIMEOUT):
+                    await service.connect(autopair=False)
+            except ConnectionRefusedError:
+                with suppress(Exception):
+                    await service.close()
+                if index == len(ports) - 1:
+                    raise
+                continue
+            except BaseException:
+                with suppress(Exception):
+                    await service.close()
+                raise
+            if port != self.port:
+                LOG.info('RemotePairing answered on port %s', port)
+                self.port = port
+            return service
 
     async def monitor_wifi_task(self):
         delay = RETRY_MIN
@@ -139,9 +170,7 @@ class DirectCore(TunneldCore):
             claimed = False
             started = time.monotonic()
             try:
-                service = DirectProvider(self.config)
-                async with asyncio.timeout(CONNECT_TIMEOUT):
-                    await service.connect(autopair=False)
+                service = await self.connect_peer()
                 LOG.info('Existing RemotePairing trust verified')
                 task = asyncio.create_task(self.start_tunnel_task(key, service),
                                            name='wireguard-device-tunnel')

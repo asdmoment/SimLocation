@@ -179,7 +179,7 @@ simlocation web --remote --port 8765
 > simlocation web --hash-password        # 输入两次密码，输出 SIMLOCATION_WEB_PASSWORD_HASH=… 一行
 > ```
 >
-> 把输出写进服务的环境变量后，控制台改为用户名 + 密码登录（表单可被 iCloud 密码等密码管理器保存和自动填充）。服务器只保存 scrypt 哈希；会话 7 天无操作或 30 天后失效，重启服务会让所有会话失效；同一来源连续输错 5 次锁定 15 分钟。控制台只接受 IP 地址或 `localhost` 作为主机名（防 DNS rebinding），其他主机名可用 `SIMLOCATION_WEB_HOSTS` 放行。
+> 把输出写进服务的环境变量后，控制台改为用户名 + 密码登录（表单可被 iCloud 密码等密码管理器保存和自动填充）。服务器只保存 scrypt 哈希；会话 7 天无操作或 30 天后失效，重启服务会让所有会话失效；同一来源连续输错 5 次锁定 15 分钟；所有来源合计失败过多时，只有 30 天内在同一地址登录成功过的客户端还能登录，重启服务即可清零计数。控制台只接受 IP 地址或 `localhost` 作为主机名（防 DNS rebinding），其他主机名可用 `SIMLOCATION_WEB_HOSTS` 放行。
 >
 > 「定点」页可以收藏地点（保存在服务器的 `var/favorites.json`），配置了 `SIMLOCATION_DEFAULT_LAT/LON` 时首次打开会预填默认位置，地图也从这里开始。坐标和路线草稿保存在 `sessionStorage` 中，刷新后可恢复。
 
@@ -311,6 +311,7 @@ simlocation device remove myphone
 | `SIMLOCATION_VAR_DIR` | 自定义运行时数据文件存放目录（默认 `var/`） |
 | `SIMLOCATION_TUNNELD_URL` | 自定义 `tunneld` 服务地址（默认 `http://127.0.0.1:49151`） |
 | `SIMLOCATION_START_TIMEOUT_SECONDS` | 会话启动超时时间（默认 60 秒） |
+| `SIMLOCATION_TCP_KEEPALIVE` | 后台会话设备连接的 keepalive，格式「空闲秒,间隔秒,次数」，例如 `30,30,40`（约 20 分钟无响应才断开）；不设置时沿用 pymobiledevice3 的约 12 秒。远程（VPS）部署用，手机切到蜂窝后连接断了就无法重建 |
 | `SIMLOCATION_MAP_LISTEN` | 网页服务监听地址（默认 `127.0.0.1`） |
 | `SIMLOCATION_MAP_PORT` | 网页服务端口（默认自动分配） |
 | `SIMLOCATION_MAP_TOKEN` | 独立地图选点（`map` / `route` 不带文件）在非 loopback 监听时使用的固定令牌；网页控制台不再使用 |

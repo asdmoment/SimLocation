@@ -138,6 +138,38 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         sleep.assert_awaited_once_with(a.RETRY_MIN)
         self.assertEqual(core.tunnel_tasks, {})
 
+    async def test_refused_port_falls_back_and_is_remembered(self):
+        refused, answered = AsyncMock(), AsyncMock()
+        refused.connect.side_effect = ConnectionRefusedError()
+        tried = []
+        def provider(config):
+            tried.append(config['port'])
+            return answered if config['port'] == 49154 else refused
+        core = a.DirectCore({'udid': 'test', 'port': 49152})
+        with patch.object(a, 'DirectProvider', side_effect=provider):
+            self.assertIs(await core.connect_peer(), answered)
+            self.assertEqual(tried, [49152, 49153, 49154])
+            self.assertEqual(refused.close.await_count, 2)
+            tried.clear()
+            await core.connect_peer()
+        self.assertEqual(tried, [49154], 'the port that answered goes first next time')
+
+    async def test_timeout_does_not_scan_and_all_refused_reraises(self):
+        slow = AsyncMock()
+        slow.connect.side_effect = TimeoutError()
+        with patch.object(a, 'DirectProvider', return_value=slow) as provider:
+            with self.assertRaises(TimeoutError):
+                await a.DirectCore({'udid': 'test', 'port': 49152}).connect_peer()
+        provider.assert_called_once()
+        slow.close.assert_awaited_once()
+        refused = AsyncMock()
+        refused.connect.side_effect = ConnectionRefusedError()
+        with patch.object(a, 'DirectProvider', return_value=refused) as provider:
+            with self.assertRaises(ConnectionRefusedError):
+                await a.DirectCore({'udid': 'test', 'port': 50000}).connect_peer()
+        self.assertEqual(provider.call_count, 1 + len(a.PORT_SCAN))
+        self.assertEqual(refused.close.await_count, 1 + len(a.PORT_SCAN))
+
     async def test_cancellation_closes_unclaimed_service(self):
         service = AsyncMock()
         service.connect.side_effect = asyncio.CancelledError()
