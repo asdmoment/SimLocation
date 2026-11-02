@@ -125,6 +125,27 @@ class DeviceTests(unittest.TestCase):
         tun.close.assert_called_once()
 
 
+class SelfTestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runs_tunnel_interface_steps_on_a_separate_name(self):
+        tun = Mock()
+        with patch.object(a.tunnel_service, 'TunTapDevice', return_value=tun) as device, \
+             patch.object(a, 'Path') as path:
+            await a.self_test()
+        device.assert_called_once_with(name='simloc-test')
+        path.assert_called_once_with('/proc/sys/net/ipv6/conf/simloc-test/disable_ipv6')
+        self.assertEqual((tun.addr, tun.mtu), (a.SELF_TEST_ADDRESS, 1280))
+        tun.up.assert_called_once()
+        tun.close.assert_called_once()
+
+    async def test_interface_is_removed_when_a_step_fails(self):
+        tun = Mock()
+        tun.up.side_effect = PermissionError()
+        with patch.object(a.tunnel_service, 'TunTapDevice', return_value=tun), patch.object(a, 'Path'):
+            with self.assertRaises(PermissionError):
+                await a.self_test()
+        tun.close.assert_called_once()
+
+
 class MonitorTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_connection_closes_service_and_backs_off(self):
         service = AsyncMock()

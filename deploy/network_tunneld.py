@@ -6,6 +6,7 @@ Bonjour discovery is replaced with a fixed address. Never initiates new pairing.
 """
 import argparse
 import asyncio
+import inspect
 import ipaddress
 import json
 import logging
@@ -31,6 +32,8 @@ RETRY_MAX = 30
 PORT_SCAN = range(49152, 49168)
 LOG = logging.getLogger('simlocation.network')
 TUN_INTERFACE = 'simloc-rsd'
+SELF_TEST_INTERFACE = 'simloc-test'
+SELF_TEST_ADDRESS = 'fd5e:1f00:7e57::1'
 # Linux values; the adapter only runs on Linux, the fallbacks keep tests importable elsewhere.
 TCP_KEEPIDLE = getattr(socket, 'TCP_KEEPIDLE', 4)
 TCP_KEEPINTVL = getattr(socket, 'TCP_KEEPINTVL', 5)
@@ -39,15 +42,35 @@ TCP_USER_TIMEOUT = getattr(socket, 'TCP_USER_TIMEOUT', 18)
 KEEPALIVE_LIMITS = {'idle': (1, 3600), 'interval': (1, 600), 'count': (1, 127)}
 
 
-def create_device(_interface_name=None):
+def create_device(_interface_name=None, name=TUN_INTERFACE):
     """Enable IPv6 only on our new link, even on IPv4-only VPS hosts."""
-    tun = tunnel_service.TunTapDevice(name=TUN_INTERFACE)
+    tun = tunnel_service.TunTapDevice(name=name)
     try:
-        Path(f'/proc/sys/net/ipv6/conf/{TUN_INTERFACE}/disable_ipv6').write_text('0\n')
+        Path(f'/proc/sys/net/ipv6/conf/{name}/disable_ipv6').write_text('0\n')
     except BaseException:
         tun.close()
         raise
     return tun
+
+
+async def self_test():
+    """Run the interface steps of a tunnel start as this account, then undo them.
+
+    The real ones only happen once the phone connects, so a permissions problem (non-root
+    account, capability set, sandbox) would otherwise surface only in front of the user.
+    A separate name keeps a live tunnel untouched.
+    """
+    tun = create_device(name=SELF_TEST_INTERFACE)
+    try:
+        tun.addr = SELF_TEST_ADDRESS
+        tun.mtu = 1280
+        result = tun.up()
+        if inspect.isawaitable(result):
+            await result
+    finally:
+        result = tun.close()
+        if inspect.isawaitable(result):
+            await result
 
 
 def load_config(path):
@@ -205,10 +228,17 @@ def make_runner(config):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--config')
+    group.add_argument('--self-test', action='store_true',
+                       help='create, address and remove a test interface, then exit')
     args = parser.parse_args()
     if version('pymobiledevice3') != PINNED_VERSION:
         raise SystemExit('Adapter requires pymobiledevice3 ' + PINNED_VERSION)
+    if args.self_test:
+        asyncio.run(self_test())
+        print('self-test ok: interface created, addressed, brought up and removed')
+        return
     config = load_config(args.config)
     logging.basicConfig(level=logging.INFO)
     apply_keepalive(config)
