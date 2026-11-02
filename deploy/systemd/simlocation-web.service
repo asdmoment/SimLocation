@@ -1,8 +1,11 @@
 [Unit]
-Description=SimLocation authenticated WireGuard-only web console
+Description=SimLocation web console, reachable only over WireGuard
+Documentation=file:///opt/simlocation/deploy/README.md
+# The listen address lives on wg-simloc.
 Requires=wg-quick@wg-simloc.service
-Wants=simlocation-network.service
-After=wg-quick@wg-simloc.service simlocation-network.service
+Wants=simlocation-network.service simlocation-firewall.service
+After=wg-quick@wg-simloc.service simlocation-network.service simlocation-firewall.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -15,11 +18,15 @@ Environment=SIMLOCATION_VAR_DIR=/var/lib/simlocation
 Environment=SIMLOCATION_PYTHON=/opt/simlocation-venv/bin/python
 Environment=SIMLOCATION_PMD3=/opt/simlocation-venv/bin/pymobiledevice3
 Environment=SIMLOCATION_TUNNELD_URL=http://127.0.0.1:49151
+# Listen address, port, label, login and default location.
 EnvironmentFile=/etc/simlocation/web.env
-ExecStart=/opt/simlocation-venv/bin/python -u /opt/simlocation/bin/simlocation.py --connection rsd web --listen 10.77.77.1 --port 8765 --no-browser
-Restart=on-failure
+ExecStart=/opt/simlocation-venv/bin/python -u /opt/simlocation/bin/simlocation.py --connection rsd web --no-browser
+Restart=always
 RestartSec=5
 TimeoutStopSec=20
+# Location sessions are children of the console. Stopping or redeploying the
+# console must not end them, or every restart would clear the phone's location.
+KillMode=process
 StateDirectory=simlocation
 StateDirectoryMode=0700
 UMask=0077
@@ -27,11 +34,22 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/simlocation
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=
-StandardOutput=null
-StandardError=journal
-MemoryMax=256M
+# A first developer-image mount downloads and personalizes it in this cgroup.
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target

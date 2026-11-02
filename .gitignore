@@ -7,3 +7,7 @@ var/*
 .claude/settings.local.json
 docs/
 .worktrees/
+
+# Fleet inventory: SSH aliases, device id, keys. Never commit.
+deploy/fleet.json
+deploy/fleet.tmp

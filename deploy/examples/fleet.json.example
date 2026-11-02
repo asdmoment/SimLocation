@@ -1,0 +1,17 @@
+{
+  "phone": {
+    "udid": "00008xxx-xxxxxxxxxxxxxxxx",
+    "alias": "iPhone",
+    "address": "10.77.77.2",
+    "pair_record": "~/.pymobiledevice3/remote_00008xxx-xxxxxxxxxxxxxxxx.plist",
+    "pair_reference": null,
+    "public_key": null
+  },
+  "defaults": {
+    "default_location": [39.909, 116.397]
+  },
+  "hosts": {
+    "vps-a": {"ssh": ["vps-a"], "endpoint": "auto", "address": "10.77.77.1", "label": "vps-a"},
+    "vps-b": {"ssh": ["-J", "vps-a", "vps-b"], "endpoint": "auto", "address": "10.77.77.11", "label": "vps-b"}
+  }
+}

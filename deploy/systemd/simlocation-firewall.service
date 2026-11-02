@@ -1,0 +1,17 @@
+[Unit]
+Description=SimLocation output filter: only its own accounts reach the phone and tunneld
+Documentation=file:///opt/simlocation/deploy/README.md
+After=nftables.service
+Before=simlocation-network.service simlocation-web.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# firewall.nft creates, flushes and refills `table inet simlocation`, so a
+# reload is atomic and leaves every other table (ufw, fail2ban) alone.
+ExecStart=/usr/sbin/nft -f /etc/simlocation/firewall.nft
+ExecReload=/usr/sbin/nft -f /etc/simlocation/firewall.nft
+ExecStop=/usr/sbin/nft delete table inet simlocation
+
+[Install]
+WantedBy=multi-user.target
