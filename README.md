@@ -340,6 +340,17 @@ simlocation doctor
 
 ---
 
+## 远程部署：手机脱离电脑（WireGuard + VPS）
+
+把 tunneld 与网页控制台部署到一台公网 VPS，手机用官方 WireGuard 接入后即可**只用手机**
+（Safari 打开网页控制台）设定位 / 清除，无需连 Mac、不插 USB。完整的部署步骤、systemd
+单元、配置模板、运维命令、安全边界与调查记录见 [`deploy/`](deploy/README.md)。
+
+- **边界**：纯蜂窝下无法从零新建开发者通道（iOS 配对服务禁止 cellular/loopback）；可行形态是
+  任意 WiFi 下建立、切到蜂窝后保持，保持期间 WireGuard 为活动 VPN、Surge 停用。
+- 网页「定点」页新增「设为默认位置」（使用 `SIMLOCATION_DEFAULT_LAT` / `SIMLOCATION_DEFAULT_LON`）
+  与「清除定位」按钮。
+
 ## 平台支持
 
 | 平台 | 兼容性 | 备注 |

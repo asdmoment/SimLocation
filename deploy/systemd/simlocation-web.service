@@ -1,0 +1,37 @@
+[Unit]
+Description=SimLocation authenticated WireGuard-only web console
+Requires=wg-quick@wg-simloc.service
+Wants=simlocation-network.service
+After=wg-quick@wg-simloc.service simlocation-network.service
+
+[Service]
+Type=simple
+User=simlocation
+Group=simlocation
+WorkingDirectory=/opt/simlocation
+Environment=HOME=/var/lib/simlocation
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=SIMLOCATION_VAR_DIR=/var/lib/simlocation
+Environment=SIMLOCATION_PYTHON=/opt/simlocation-venv/bin/python
+Environment=SIMLOCATION_PMD3=/opt/simlocation-venv/bin/pymobiledevice3
+Environment=SIMLOCATION_TUNNELD_URL=http://127.0.0.1:49151
+EnvironmentFile=/etc/simlocation/web.env
+ExecStart=/opt/simlocation-venv/bin/python -u /opt/simlocation/bin/simlocation.py --connection rsd web --listen 10.77.77.1 --port 8765 --no-browser
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+StateDirectory=simlocation
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/simlocation
+CapabilityBoundingSet=
+StandardOutput=null
+StandardError=journal
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

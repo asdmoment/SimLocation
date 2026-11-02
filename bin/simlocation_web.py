@@ -66,6 +66,7 @@ class WebConsole:
                 "state": state,
                 "description": cli.describe_session_state(state),
             })
+        coords = cli.env_default_coordinates()
         return {
             "devices": devices, "default": default_udid, "preferred": preferred,
             "job": job, "scanned_at": scanned_at,
@@ -73,6 +74,7 @@ class WebConsole:
             "connection": self.args.connection, "debug": self.args.debug,
             "provider": "amap" if os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() else "osm",
             "max_route_bytes": cli.MAX_ROUTE_BYTES, "max_route_points": cli.MAX_ROUTE_POINTS,
+            "defaults": {"lat": coords[0], "lon": coords[1]} if coords else None,
         }
 
     def prepare(self, data):

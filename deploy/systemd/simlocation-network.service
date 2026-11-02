@@ -1,0 +1,32 @@
+[Unit]
+Description=SimLocation RemotePairing tunnel over WireGuard
+Requires=wg-quick@wg-simloc.service
+After=network-online.target wg-quick@wg-simloc.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/simlocation
+Environment=HOME=/var/lib/simlocation-tunnel
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/simlocation-venv/bin/python -u /opt/simlocation/deploy/network_tunneld.py --config /etc/simlocation/network.json
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+StateDirectory=simlocation-tunnel
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/simlocation-tunnel
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

@@ -168,7 +168,8 @@ function updateButtons() {
   const locked = !online || isBusy();
   document.querySelectorAll("[data-operation]").forEach(button => { button.disabled = locked; });
   const device = targetDevice();
-  for (const id of ["set-location", "clear-location", "set-default"]) $(id).disabled = locked || !device;
+  for (const id of ["set-location", "clear-location", "set-default", "use-default"]) $(id).disabled = locked || !device;
+  if (snapshot && !(snapshot.defaults && snapshot.defaults.lat != null)) $("use-default").disabled = true;
   $("start-route").disabled = locked || !device || routeDistance(points, $("loop").checked) <= .001 ||
     ["speed", "speed-noise", "position-noise"].some(id => !$(id).checkValidity());
   $("alias-form").querySelector("button").disabled = locked || !device;
@@ -318,6 +319,13 @@ $("doctor").onclick = () => perform("doctor");
 $("set-default").onclick = () => perform("device_default");
 $("alias-form").onsubmit = event => { event.preventDefault(); perform("device_add", { alias: $("alias").value.trim() }); };
 $("clear-location").onclick = () => perform("clear");
+$("use-default").onclick = () => {
+  const d = snapshot && snapshot.defaults;
+  if (!d || d.lat == null || d.lon == null) { errorMessage("服务器未配置默认坐标（SIMLOCATION_DEFAULT_LAT / LON）。"); return; }
+  $("latitude").value = d.lat; $("longitude").value = d.lon;
+  point = readPoint(); updateDraft(); sendDraft(true);
+  if (point.length) perform("set", { lat: point[0][0], lon: point[0][1] });
+};
 $("clear-all").onclick = () => confirmClear("清除全部活跃会话？", "所有设备上的运动轨迹和定点定位都将结束，恢复真实位置。", () => perform("clear_all", { confirm: true }));
 $("point-form").onsubmit = event => {
   event.preventDefault(); point = readPoint(); updateDraft(); sendDraft(true);

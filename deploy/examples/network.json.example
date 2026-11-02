@@ -1,0 +1,7 @@
+{
+  "udid": "00000000-0000000000000000",
+  "host": "10.77.77.2",
+  "port": 49152,
+  "pair_record": "/var/lib/simlocation-tunnel/pairing/device.plist",
+  "keepalive": { "idle": 30, "interval": 30, "count": 40 }
+}

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- 新增远程部署套件 `deploy/`：把 tunneld 与网页控制台部署到公网 VPS，手机经官方 WireGuard 接入后**只用手机**即可设定位 / 清除。含 WireGuard 直连 tunneld 适配器（可选 `keepalive` 放宽蜂窝下断连判定并设置同长 `TCP_USER_TIMEOUT`）、只读验证与保持测试脚本及其单元测试、systemd 单元、脱敏配置模板、搭建与诊断脚本，以及纯蜂窝 / WireGuard 的调查与结论记录（`deploy/notes/`）。
+- 网页控制台「定点」页新增「设为默认位置」（使用 `SIMLOCATION_DEFAULT_LAT` / `SIMLOCATION_DEFAULT_LON`）与「清除定位」按钮；后端 `/api/state` 暴露默认坐标。清除定位的后端动作与前端逻辑此前已存在，但定点页缺少按钮，一并补上。
+- 边界：纯蜂窝下无法从零新建开发者通道（iOS 配对服务禁止 cellular/loopback 建立新连接）；可行形态为任意 WiFi 下建立、切蜂窝后保持，保持期间 WireGuard 为活动 VPN、Surge 停用。凭据（WireGuard 私钥、配对记录、访问令牌、auth key）不入库，仅存于 VPS。
+
 ## v3.5.0
 
 - 运动轨迹新增两个可选的随机扰动参数,默认都为 0（关闭），互不影响、每次播放重新随机：
