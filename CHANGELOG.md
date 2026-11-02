@@ -2,9 +2,23 @@
 
 ## Unreleased
 
-- 新增远程部署套件 `deploy/`：把 tunneld 与网页控制台部署到公网 VPS，手机经官方 WireGuard 接入后**只用手机**即可设定位 / 清除。含 WireGuard 直连 tunneld 适配器（可选 `keepalive` 放宽蜂窝下断连判定并设置同长 `TCP_USER_TIMEOUT`）、只读验证与保持测试脚本及其单元测试、systemd 单元、脱敏配置模板、搭建与诊断脚本，以及纯蜂窝 / WireGuard 的调查与结论记录（`deploy/notes/`）。
-- 网页控制台「定点」页新增「设为默认位置」（使用 `SIMLOCATION_DEFAULT_LAT` / `SIMLOCATION_DEFAULT_LON`）与「清除定位」按钮；后端 `/api/state` 暴露默认坐标。清除定位的后端动作与前端逻辑此前已存在，但定点页缺少按钮，一并补上。
-- 边界：纯蜂窝下无法从零新建开发者通道（iOS 配对服务禁止 cellular/loopback 建立新连接）；可行形态为任意 WiFi 下建立、切蜂窝后保持，保持期间 WireGuard 为活动 VPN、Surge 停用。凭据（WireGuard 私钥、配对记录、访问令牌、auth key）不入库，仅存于 VPS。
+- 新增远程部署 `deploy/`：手机装官方 WireGuard 连到 VPS 后，**只用手机**就能设定位或清除。`deploy/fleet.py` 在 Mac 上用一条命令部署和运维多台 VPS，内容包括 WireGuard、tunneld 适配器、网页控制台和 nftables 出站过滤。手机只需导入一个 WireGuard 配置，就能同时连上全部主机，任意一台都可以使用。手机密钥和控制台密码在本机生成，服务器只保存公钥和 scrypt 哈希；工具会输出二维码，以及可导入「密码」App 的 CSV。系统 python3 没有 TLS-PSK 时，自动安装 deadsnakes 的 Python 3.14。
+- 网页控制台改为密码登录，凭据不再出现在 URL 里：
+  - 会话 cookie 设为 `HttpOnly; SameSite=Strict`，`/api/*` 另需 CSRF 头。
+  - `web --hash-password` 生成密码哈希；没有设置哈希时，启动时打印一次性登录链接。
+  - 失败次数按来源和全局两级限制，30 天内在同一地址登录成功过的客户端不受全局上限影响。
+  - 用 Host 名单防御 DNS 重绑定。
+- 网页控制台新增：收藏地点（`var/favorites.json`）；默认坐标同时作为地图的初始视野；`SIMLOCATION_WEB_LABEL` 用来区分主机；定点页增加「设为默认位置」和「清除定位」按钮。
+- 手机重启后，第一次设定位时自动挂载开发者镜像（iOS 27 是 Cryptex 个性化镜像，经 RSD 安装，不需要 Mac）。新增 `SIMLOCATION_TCP_KEEPALIVE`，放宽定位会话设备连接的断线判定。适配器在 49152–49167 之间自动回退端口。
+- 加固：
+  - 适配器以只有 `CAP_NET_ADMIN` 的 `simlocation-tunnel` 账户运行，启动前执行 `--self-test`。
+  - 控制台单元设为 `KillMode=process`，重启时不结束定位会话。
+  - 部署工具在服务账户目录里以该账户身份写文件，读取时不跟随符号链接；从参考主机取回的配对记录，校验密钥一致后才会分发。
+- 边界（iOS 27.2 实测）：
+  - 纯蜂窝下无法从零新建开发者通道。可行的用法是连任意 Wi-Fi 时建立，再切到蜂窝保持；保持期间 WireGuard 必须是活动 VPN，Surge 会被停用。
+  - 同一个配对身份可以同时被多台主机使用。
+  - 与 JitStreamer-EB、omarchy 等方案的对照见 `deploy/notes/prior-art.md`。
+- 移除 `deploy/setup/`（已由 fleet.py 取代）和旧的令牌导出脚本；测试改用合成的 UDID 和坐标。
 
 ## v3.5.0
 

@@ -53,6 +53,7 @@
 - Launcher help check when deps are installed: `bin/simlocation --help`; version: `bin/simlocation --version`
 - CLI help check when Python deps are installed: `python3 bin/simlocation.py --help`
 - AFC helper help: `bash tools/pm3-afc-sync.sh --help`
+- Remote VPS fleet (run on the Mac; inventory in git-ignored `deploy/fleet.json`): `python3 deploy/fleet.py status|deploy [HOST...] [--restart-network]|phone|password [HOST...]|favorites --from HOST`
 
 ## Repo Environment Variables
 
@@ -63,6 +64,8 @@
 - tunneld base URL: `SIMLOCATION_TUNNELD_URL`
 - Map picker provider key: `SIMLOCATION_AMAP_KEY`
 - Map picker binding and access: `SIMLOCATION_MAP_LISTEN`, `SIMLOCATION_MAP_PORT`, `SIMLOCATION_MAP_TIMEOUT_SECONDS`, `SIMLOCATION_MAP_TOKEN`
+- Web console login and labels: `SIMLOCATION_WEB_PASSWORD_HASH`, `SIMLOCATION_WEB_USER`, `SIMLOCATION_WEB_LABEL`, `SIMLOCATION_WEB_HOSTS`
+- Device socket keepalive for hold sessions: `SIMLOCATION_TCP_KEEPALIVE` (`idle,interval,count`)
 
 ## Dependency Checks
 
@@ -79,6 +82,7 @@
 - CLI smoke check with deps installed: `python3 bin/simlocation.py --help`
 - Read-only environment diagnostic: `bin/simlocation doctor`
 - Helper smoke check: `bash tools/pm3-afc-sync.sh --help`
+- Deploy tooling tests: `cd deploy && python3 -m unittest test_fleet test_network_tunneld test_hold_probe` (no SSH, systemd or device)
 
 ## Single-Test Guidance
 
@@ -175,9 +179,10 @@
 
 ## Secrets And Local Defaults
 
-- Do not hardcode private coordinates in the repository.
+- Do not hardcode private coordinates, real UDIDs, host names, SSH aliases, public IPs or home-directory paths in the repository; tests use synthetic values.
 - Prefer local environment variables such as `SIMLOCATION_DEFAULT_LAT` and `SIMLOCATION_DEFAULT_LON`.
-- Do not commit generated files under `var/`.
+- Do not commit generated files under `var/`, or `deploy/fleet.json`.
+- Never print WireGuard private keys, console passwords or pairing records. Phone configs, QR codes and the password CSV go to a private (0700) directory and are deleted once imported.
 
 ## When You Change Behavior
 
@@ -190,10 +195,18 @@
 - Keep device operations in the existing CLI functions; the web API validates input and serializes operations in a worker. Never run interactive device selection in an HTTP handler.
 - Keep HTTP status reads independent of device discovery and DVT waits. Include devices with only a runtime state file.
 - Reap session children in persistent parents. A successful device clear does not prove the child was reaped; check process exit as well as the state and PID files.
-- Authenticate all console pages/assets and API requests, including loopback. API calls require the token header; do not add permissive CORS or log credential-bearing URLs.
+- Authenticate all console pages/assets and API requests, including loopback: a login session cookie (`HttpOnly; SameSite=Strict`) and, on `/api/*`, the session's CSRF header. Never put credentials in URLs, add permissive CORS, or relax the Host/Origin checks.
 - The embedded maps only edit drafts through same-origin, source-checked messages. Device actions require explicit console controls.
 - `web` is persistent; legacy `map` and map-based `route` retain one-shot behavior and timeout semantics.
 - HTTP tests bind loopback ports and mock every device operation; no real device is required. Browser contract tests use SDK stubs for both providers.
+
+## Remote Deploy Boundaries
+
+- `deploy/fleet_remote.py` runs as root on the host's own `python3` (3.12 on Ubuntu 24.04): standard library only. Parameters and secrets travel on stdin, never in a command line.
+- Never write, chown or follow links as root inside `/var/lib/simlocation` or `/var/lib/simlocation-tunnel`; use `write_as` (runs as the account) and `read_private` (per-component `O_NOFOLLOW`).
+- A deploy restarts only what changed, and never restarts `simlocation-network` while tunneld holds a tunnel unless `--restart-network` is given (a phone on cellular cannot rebuild it).
+- Keep the adapter on `simlocation-tunnel` with only `CAP_NET_ADMIN`, the console without capabilities and with `KillMode=process`, and apt's needrestart suspended.
+- Device-facing claims about iOS behavior belong in `deploy/notes/` with how they were measured.
 
 ## Recommended Agent Workflow
 

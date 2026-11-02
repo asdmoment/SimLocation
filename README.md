@@ -356,14 +356,17 @@ simlocation doctor
 
 ## 远程部署：手机脱离电脑（WireGuard + VPS）
 
-把 tunneld 与网页控制台部署到一台公网 VPS，手机用官方 WireGuard 接入后即可**只用手机**
-（Safari 打开网页控制台）设定位 / 清除，无需连 Mac、不插 USB。完整的部署步骤、systemd
-单元、配置模板、运维命令、安全边界与调查记录见 [`deploy/`](deploy/README.md)。
+把 tunneld 和网页控制台部署到一台或多台公网 VPS，手机用官方 WireGuard 接入后，**只用手机**
+（在 Safari 里打开网页控制台）就能设定位或清除，不用连 Mac，也不用插 USB。
 
-- **边界**：纯蜂窝下无法从零新建开发者通道（iOS 配对服务禁止 cellular/loopback）；可行形态是
-  任意 WiFi 下建立、切到蜂窝后保持，保持期间 WireGuard 为活动 VPN、Surge 停用。
-- 网页「定点」页新增「设为默认位置」（使用 `SIMLOCATION_DEFAULT_LAT` / `SIMLOCATION_DEFAULT_LON`）
-  与「清除定位」按钮。
+`deploy/fleet.py` 在 Mac 上用一条命令部署和运维全部主机，并生成手机的 WireGuard 二维码和控制台密码
+（可导入「密码」App）。手机只需导入一个配置，就能同时连上所有主机。部署步骤、安全边界和调查记录见
+[`deploy/`](deploy/README.md)，与 JitStreamer-EB 等同类方案的对照见
+[`deploy/notes/prior-art.md`](deploy/notes/prior-art.md)。
+
+- **边界**（iOS 27.2 实测）：纯蜂窝下无法从零新建开发者通道，因为 iOS 配对服务禁止 cellular 和
+  loopback 类型的新连接。可行的用法是连任意 Wi-Fi 时建立通道，再切到蜂窝保持；保持期间 WireGuard
+  必须是活动 VPN，Surge 会被停用。
 
 ## 平台支持
 
