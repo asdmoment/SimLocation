@@ -1,10 +1,10 @@
-import asyncio,json,socket,subprocess,time
+import asyncio,json,os,socket,subprocess,time
 from pathlib import Path
 from pymobiledevice3.remote.tunnel_service import RemotePairingTunnelService,RemotePairingManualPairingService
-udid=json.loads(Path('/Users/user/SimLocation/var/devices.json').read_text())['aliases']['myphone']
+udid=os.environ['SIMLOCATION_UDID']
 with socket.socket() as sock:
  sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
-proc=subprocess.Popen(['ssh','-N','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ExitOnForwardFailure=yes','-o','ControlMaster=no','-o','ControlPath=none','-L',f'127.0.0.1:{port}:10.77.77.2:49152','vps'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+proc=subprocess.Popen(['ssh','-N','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ExitOnForwardFailure=yes','-o','ControlMaster=no','-o','ControlPath=none','-L',f'127.0.0.1:{port}:10.77.77.2:49152',os.environ.get('SIMLOCATION_SSH_HOST','vps')],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
 async def run():
  await asyncio.sleep(1)
  if proc.poll() is not None:raise RuntimeError('SSH forwarding exited')

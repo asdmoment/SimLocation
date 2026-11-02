@@ -4,7 +4,7 @@
 
 ## 已完成
 
-- vps 安装 WireGuard；接口 `wg-simloc`，UDP 51820，服务器 `10.77.77.1/30`，手机 `10.77.77.2/32`。
+- 首台 VPS 安装 WireGuard；接口 `wg-simloc`，UDP 51820，服务器 `10.77.77.1/30`，手机 `10.77.77.2/32`。
 - 手机仅将 `10.77.77.1/32` 路由到隧道；未修改默认路由、DNS、NAT。
 - 手机已成功握手。此前经 VPS 转发，Mac 上完成了配对验证、TLS-PSK、RSD、DVT、LocationSimulation 通道验证；未发送定位坐标。
 - VPS 独立 Python 环境 `/opt/simlocation-venv`，pymobiledevice3 固定为 11.49.2，依赖清单 `/etc/simlocation/requirements.lock`。
@@ -42,7 +42,7 @@
 - WireGuard 手机配置和二维码也含私钥，请勿公开。
 - 网页 HTTP 流量在 WireGuard 内传输，没有开放公网网页端口。
 
-## 运维（在 vps 上执行）
+## 运维（在首台 VPS 上执行）
 
 ```sh
 systemctl status simlocation-network simlocation-web wg-quick@wg-simloc
@@ -109,9 +109,9 @@ systemctl stop simloc-holdprobe              # 提前结束，不发清除或坐
 
 ## 21:30 网页：默认坐标一键 + 定点页清除
 
-- 后端 `state()` 新增 `defaults`（读 `SIMLOCATION_DEFAULT_LAT/LON`）；`/etc/simlocation/web.env` 增默认坐标 31.230416 / 121.473701。
+- 后端 `state()` 新增 `defaults`（读 `SIMLOCATION_DEFAULT_LAT/LON`）；`/etc/simlocation/web.env` 增默认坐标（`SIMLOCATION_DEFAULT_LAT/LON`）。
 - 定点页补「设为默认位置」(use-default) 与「清除定位」(clear-location)。clear 的后端 action 与前端 onclick 本已存在，HTML 此前漏了按钮元素，一并修好。
-- 端到端真机验证（经网页同一套 API）：set 默认坐标 → 设备 ready(31.230416,121.473701) → clear → stopped，均 job succeeded。
+- 端到端真机验证（经网页同一套 API）：set 默认坐标 → 设备 ready（默认坐标）→ clear → stopped，均 job succeeded。
 - 改动文件：本机仓库 web/console.html、web/console.js、bin/simlocation_web.py，已部署到 /opt/simlocation（未提交 git）。备份后缀 .bak-20261102-webdefault。
 
 回滚：

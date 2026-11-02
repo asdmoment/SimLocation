@@ -4,7 +4,7 @@
 
 ## 范围
 
-本机 iPhone 当前 iOS、官方 WireGuard、vps 上的 RemotePairing 连接。结论限定于本次实际测试的路径，不泛化为所有 VPN、所有 iOS 版本或所有手机端实现。
+本机 iPhone 当前 iOS、官方 WireGuard、首台 VPS 上的 RemotePairing 连接。结论限定于本次实际测试的路径，不泛化为所有 VPN、所有 iOS 版本或所有手机端实现。
 
 ## 测试
 

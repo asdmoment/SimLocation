@@ -1,10 +1,11 @@
-import asyncio,json,subprocess
+import asyncio,json,os,subprocess
 from pathlib import Path
 from mcp import ClientSession,StdioServerParameters
 from mcp.client.stdio import stdio_client
-rules=[f'AND,((SRC-IP,fd00::10),(IP-CIDR6,::1/128,no-resolve),(DEST-PORT,{port})),DIRECT' for port in (49152,62078)]
+SOURCE=os.environ['SIMLOCATION_TAILNET_SOURCE']  # this Mac's tailnet IPv6
+rules=[f'AND,((SRC-IP,{SOURCE}),(IP-CIDR6,::1/128,no-resolve),(DEST-PORT,{port})),DIRECT' for port in (49152,62078)]
 async def main():
- c=json.loads(Path('/Users/user/.claude.json').read_text())['mcpServers']['surge-18p']
+ c=json.loads((Path.home()/'.claude.json').read_text())['mcpServers']['surge-18p']
  async with stdio_client(StdioServerParameters(command=c['command'],args=c['args'])) as(r,w):
   async with ClientSession(r,w) as s:
    await s.initialize();added=[]

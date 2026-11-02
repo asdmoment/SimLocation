@@ -1,10 +1,11 @@
-import asyncio,json,time,struct,plistlib
+import asyncio,json,os,time,struct,plistlib
 from pathlib import Path
 from pymobiledevice3.remote.tunnel_service import RemotePairingTunnelService,RemotePairingManualPairingService
-udid=json.loads(Path('/Users/user/SimLocation/var/devices.json').read_text())['aliases']['myphone']
+udid=os.environ['SIMLOCATION_UDID']
+PHONE=tuple(os.environ['SIMLOCATION_PHONE_TAILNET'].split(','))  # the phone's tailnet IPv4,IPv6
 original_open=asyncio.open_connection
 async def through_proxy(host,port,*a,**kw):
- if host not in ('100.64.0.10','fd00::11'): return await original_open(host,port,*a,**kw)
+ if host not in PHONE: return await original_open(host,port,*a,**kw)
  r,w=await original_open('127.0.0.1',6152)
  target=f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
  w.write(f'CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n'.encode());await w.drain()
@@ -43,7 +44,7 @@ async def lockdown(host):
 async def main():
  asyncio.open_connection=through_proxy
  try:
-  for host in ('100.64.0.10','fd00::11'):
+  for host in PHONE:
    for cls in (RemotePairingTunnelService,RemotePairingManualPairingService):await probe(cls,host)
    await lockdown(host)
  finally:asyncio.open_connection=original_open

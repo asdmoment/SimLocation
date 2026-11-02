@@ -1,16 +1,16 @@
-import asyncio,json,socket,subprocess,time
+import asyncio,json,os,socket,subprocess,time
 from pathlib import Path
 from pymobiledevice3.remote.tunnel_service import RemotePairingTunnelService
 import pymobiledevice3.remote.userspace_tunnel as ut
 from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
 from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
-udid=json.loads(Path('/Users/user/SimLocation/var/devices.json').read_text())['aliases']['myphone']
+udid=os.environ['SIMLOCATION_UDID']
 children=[];start=time.monotonic();stage='startup'
 def note(text):print(f'[{time.monotonic()-start:.2f}s] {text}',flush=True)
 async def forward(remote_port):
  with socket.socket() as sock:
   sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
- p=subprocess.Popen(['ssh','-N','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ExitOnForwardFailure=yes','-o','ControlMaster=no','-o','ControlPath=none','-L',f'127.0.0.1:{port}:10.77.77.2:{remote_port}','vps'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ p=subprocess.Popen(['ssh','-N','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ExitOnForwardFailure=yes','-o','ControlMaster=no','-o','ControlPath=none','-L',f'127.0.0.1:{port}:10.77.77.2:{remote_port}',os.environ.get('SIMLOCATION_SSH_HOST','vps')],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
  children.append(p)
  for _ in range(30):
   await asyncio.sleep(.1)

@@ -3,7 +3,7 @@ from pathlib import Path
 from mcp import ClientSession,StdioServerParameters
 from mcp.client.stdio import stdio_client
 async def main():
- c=json.loads(Path('/Users/user/.claude.json').read_text())['mcpServers'][sys.argv[1]]
+ c=json.loads((Path.home()/'.claude.json').read_text())['mcpServers'][sys.argv[1]]
  async with stdio_client(StdioServerParameters(command=c['command'],args=c['args'])) as (r,w):
   async with ClientSession(r,w) as s:
    await s.initialize()
