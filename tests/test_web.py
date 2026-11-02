@@ -159,6 +159,25 @@ class WebConsoleTests(unittest.TestCase):
         response, _ = self.raw("GET", "/login")
         self.assertEqual(response.getheader("Referrer-Policy"), "same-origin")
 
+    def test_failures_from_many_clients_slow_logins_but_never_lock_the_owner_out(self):
+        slept = []
+        auth = web.Auth(PASSWORD_HASH, "tester", clock=lambda: self.now, sleep=slept.append)
+        with patch.object(web, "verify_password", side_effect=lambda password, _parsed: password == PASSWORD):
+            for index in range(web.LOGIN_FAILURES_TOTAL):
+                self.assertIsNone(auth.login(f"10.0.0.{index}", "tester", "wrong"))
+            self.assertEqual(slept, [])
+            self.assertIsNotNone(auth.login("10.9.9.9", "tester", PASSWORD))
+            self.assertEqual(slept, [web.LOGIN_SLOWDOWN_SECONDS])
+            # The per-client limit still refuses, even the right password.
+            for _ in range(web.LOGIN_FAILURES_PER_CLIENT):
+                auth.login("10.8.8.8", "tester", "wrong")
+            with self.assertRaises(web.LoginThrottled):
+                auth.login("10.8.8.8", "tester", PASSWORD)
+            self.now += web.LOGIN_WINDOW_SECONDS + 1
+            slept.clear()
+            self.assertIsNotNone(auth.login("10.8.8.8", "tester", PASSWORD))
+            self.assertEqual(slept, [], "the shared count expires with the window")
+
     def test_sessions_expire_and_logout_revokes(self):
         self.now += web.SESSION_IDLE_SECONDS - 10
         self.assertEqual(self.request()[0], 200)

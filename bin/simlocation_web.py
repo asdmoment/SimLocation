@@ -35,7 +35,10 @@ MAX_SESSIONS = 16
 LOGIN_CODE_SECONDS = 600
 LOGIN_WINDOW_SECONDS = 900
 LOGIN_FAILURES_PER_CLIENT = 5
+# Past this many failures from all clients together, every attempt waits
+# LOGIN_SLOWDOWN_SECONDS first. Nothing is refused on the shared count.
 LOGIN_FAILURES_TOTAL = 50
+LOGIN_SLOWDOWN_SECONDS = 2.0
 LOGIN_FORM_MAX_BYTES = 4096
 PASSWORD_MIN_CHARS = 12
 PASSWORD_MAX_CHARS = 1024
@@ -109,10 +112,11 @@ def verify_password(password, parsed):
 class Auth:
     """In-memory sessions: restarting the service signs every browser out."""
 
-    def __init__(self, password_hash=None, username=DEFAULT_WEB_USER, clock=time.monotonic):
+    def __init__(self, password_hash=None, username=DEFAULT_WEB_USER, clock=time.monotonic, sleep=time.sleep):
         self.password = parse_password_hash(password_hash) if password_hash else None
         self.username = username
         self.clock = clock
+        self.sleep = sleep
         self.lock = threading.Lock()
         # One scrypt at a time bounds memory and closes the race where parallel
         # guesses all pass the throttle check before any failure is recorded.
@@ -158,6 +162,7 @@ class Auth:
             return self._new_session(now)
 
     def _check_throttle(self, client, now):
+        """Raise for a client over its own limit; True when everyone together failed a lot."""
         cutoff = now - LOGIN_WINDOW_SECONDS
         for key in list(self.failures):
             entries = self.failures[key]
@@ -168,17 +173,24 @@ class Auth:
         mine = self.failures.get(client)
         if mine and len(mine) >= LOGIN_FAILURES_PER_CLIENT:
             raise LoginThrottled(mine[0] + LOGIN_WINDOW_SECONDS - now)
-        if sum(len(entries) for entries in self.failures.values()) >= LOGIN_FAILURES_TOTAL:
-            oldest = min(entries[0] for entries in self.failures.values())
-            raise LoginThrottled(oldest + LOGIN_WINDOW_SECONDS - now)
+        return sum(len(entries) for entries in self.failures.values()) >= LOGIN_FAILURES_TOTAL
 
     def login(self, client, username, password):
         """New session id, or None for wrong credentials. Raises LoginThrottled."""
         if self.password is None:
             return None
+        with self.lock:
+            # A locked-out client is turned away without queueing for scrypt.
+            self._check_throttle(client, self.clock())
         with self.verify_lock:
             with self.lock:
-                self._check_throttle(client, self.clock())
+                # Checked again under verify_lock, so parallel guesses from one
+                # client cannot all pass before the first failure is recorded.
+                crowded = self._check_throttle(client, self.clock())
+            if crowded:
+                # Failures from many clients only slow everyone down. Refusing
+                # here would let a few addresses lock the owner out by guessing.
+                self.sleep(LOGIN_SLOWDOWN_SECONDS)
             ok = verify_password(password, self.password)
             ok = hmac.compare_digest(username.encode("utf-8"), self.username.encode("utf-8")) and ok
             with self.lock:
