@@ -4,14 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
+  <meta name="simloc-csrf" content="{{CSRF_TOKEN}}">
   <title>SimLocation</title>
-  <link rel="stylesheet" href="/console.css?{{TOKEN_QUERY}}">
-  <script src="/console.js?{{TOKEN_QUERY}}" defer></script>
+  <link rel="stylesheet" href="/console.css">
+  <script src="/console.js" defer></script>
 </head>
 <body>
   <header class="app-header">
-    <a class="brand" href="#" aria-label="SimLocation 首页"><span class="brand-mark" aria-hidden="true">S</span>SimLocation <span id="version"></span></a>
-    <div id="connection-status" role="status">正在连接控制台</div>
+    <a class="brand" href="#" aria-label="SimLocation 首页"><span class="brand-mark" aria-hidden="true">S</span>SimLocation <span id="host-label" class="host-label" hidden></span> <span id="version"></span></a>
+    <div class="header-status"><div id="connection-status" role="status">正在连接控制台</div><button id="logout" class="text-button" type="button">退出</button></div>
   </header>
   <main>
     <aside class="workspace" aria-label="定位控制台">
@@ -38,10 +39,20 @@
             </div>
             <button class="primary full" id="set-location" type="submit" data-operation>设置定位</button>
           </form>
-          <button id="use-default" class="primary full" type="button" data-operation>设为默认位置</button>
-          <button id="clear-location" class="danger-text" type="button" data-operation>清除定位</button>
-          <button id="save-point" class="text-button" type="button">导出坐标</button>
-          <p class="note">「设为默认位置」用服务器默认坐标直接设定位；「清除定位」恢复真实位置；选点和导出仅编辑草稿。</p>
+          <button id="use-default" class="full" type="button" data-operation>设为默认位置</button>
+          <div class="row point-actions">
+            <button id="clear-point" class="danger-text" type="button" data-operation>清除定位</button>
+            <button id="save-point" class="text-button" type="button">导出坐标</button>
+          </div>
+          <p class="note">「设为默认位置」直接用服务器默认坐标设定位；「清除定位」恢复真实位置。选点、收藏和导出只改草稿。</p>
+          <section class="favorites" aria-labelledby="favorites-title">
+            <div class="section-label"><span id="favorites-title">收藏地点</span><span id="favorites-count" class="muted"></span></div>
+            <form id="favorite-form" class="favorite-form">
+              <input id="favorite-name" maxlength="60" placeholder="给当前坐标起个名字" autocomplete="off" aria-label="收藏名称" required>
+              <button id="favorite-add" type="submit">收藏</button>
+            </form>
+            <ul id="favorites-list" class="favorites-list"></ul>
+          </section>
         </section>
         <section id="view-route" hidden>
           <h1>运动轨迹</h1>
@@ -89,6 +100,7 @@
       <section class="session" aria-label="当前设备状态">
         <div class="section-label"><span>当前会话</span><span id="session-mode" class="muted">未选择设备</span></div>
         <p id="session-status">选择设备后可查看定位状态。</p>
+        <p id="tunnel-status" class="note" hidden></p>
         <progress id="session-progress" max="1" value="0" hidden></progress>
         <button id="clear-location" class="full" type="button" data-operation>清除定位</button>
         <p class="note">关闭网页后定位仍会继续。用完请清除定位。</p>
@@ -100,6 +112,6 @@
       <div class="map-footer"><span id="map-hint">正在加载地图…</span><span>WGS-84</span></div>
     </section>
   </main>
-  <dialog id="confirm-dialog"><form method="dialog"><h2 id="confirm-title">确认操作</h2><p id="confirm-description"></p><div class="row"><button value="cancel">取消</button><button value="confirm" class="primary">确认清除</button></div></form></dialog>
+  <dialog id="confirm-dialog"><form method="dialog"><h2 id="confirm-title">确认操作</h2><p id="confirm-description"></p><div class="row"><button value="cancel">取消</button><button id="confirm-button" value="confirm" class="primary">确认清除</button></div></form></dialog>
 </body>
 </html>

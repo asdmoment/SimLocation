@@ -1,7 +1,9 @@
 "use strict";
 
 const $ = id => document.getElementById(id);
-const token = new URLSearchParams(window.location.search).get("t") || "";
+// Issued per login session and embedded by the server; the session itself is
+// an HttpOnly cookie this script never sees.
+const csrf = (document.querySelector('meta[name="simloc-csrf"]') || {}).content || "";
 const actionNames = { discover: "扫描设备", doctor: "只读诊断", set: "设置定位", route: "启动运动轨迹",
   clear: "清除定位", clear_all: "清除全部会话", device_add: "保存别名", device_remove: "删除别名", device_default: "设置默认设备" };
 let snapshot = null;
@@ -17,6 +19,8 @@ let mapMode = "point";
 let mapReady = false;
 let point = [];
 let points = [];
+let favorites = [];
+let renderedFavorites = "";
 let pollTimer;
 
 function errorMessage(message = "") {
@@ -27,11 +31,17 @@ function errorMessage(message = "") {
 async function api(path, data) {
   const response = await fetch(path, {
     method: data === undefined ? "GET" : "POST",
-    headers: { "X-SimLocation-Token": token, "Content-Type": "application/json" },
+    headers: { "X-SimLocation-CSRF": csrf, "Content-Type": "application/json" },
     body: data === undefined ? undefined : JSON.stringify(data),
     cache: "no-store",
+    credentials: "same-origin",
     signal: AbortSignal.timeout(15000),
   });
+  if (response.status === 401) {
+    // Expired session, server restart, or a tab left open across a re-login.
+    window.location.assign("/login");
+    throw new Error("登录已失效，正在打开登录页。");
+  }
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "请求失败，请重试。");
   return result;
@@ -111,6 +121,63 @@ function fillPoint() {
   $("longitude").value = point.length ? point[0][1].toFixed(6) : "";
 }
 
+function pickPoint(lat, lon) {
+  point = [[lat, lon]];
+  fillPoint(); updateDraft(); sendDraft(true);
+}
+
+function favoriteRow(name, lat, lon, tag, onRemove) {
+  const item = document.createElement("li"); item.className = "favorite";
+  const pick = document.createElement("button"); pick.type = "button"; pick.className = "favorite-pick";
+  const title = document.createElement("strong"); title.textContent = name;
+  if (tag) { const badge = document.createElement("em"); badge.textContent = tag; title.append(" ", badge); }
+  const coords = document.createElement("span"); coords.textContent = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+  pick.append(title, coords);
+  pick.onclick = () => { pickPoint(lat, lon); errorMessage(); };
+  item.appendChild(pick);
+  if (onRemove) {
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "text-button favorite-remove";
+    remove.textContent = "删除"; remove.setAttribute("aria-label", "删除收藏 " + name);
+    remove.onclick = onRemove; item.appendChild(remove);
+  }
+  return item;
+}
+
+function renderFavorites() {
+  const fallback = snapshot && snapshot.defaults;
+  const signature = JSON.stringify([favorites, fallback]);
+  if (signature === renderedFavorites) return;
+  renderedFavorites = signature;
+  const list = $("favorites-list"); list.replaceChildren();
+  if (fallback) list.appendChild(favoriteRow("默认位置", fallback.lat, fallback.lon, "默认", null));
+  for (const favorite of favorites) {
+    list.appendChild(favoriteRow(favorite.name, favorite.lat, favorite.lon, "", () => confirmAction(
+      "删除收藏？", `「${favorite.name}」会从收藏里移除，不影响设备当前的定位。`, "删除",
+      () => editFavorites({ op: "remove", id: favorite.id }))));
+  }
+  if (!fallback && !favorites.length) {
+    const empty = document.createElement("li"); empty.className = "note";
+    empty.textContent = "选好坐标后起个名字，点「收藏」。"; list.appendChild(empty);
+  }
+  $("favorites-count").textContent = favorites.length ? `${favorites.length} 个` : "";
+}
+
+async function loadFavorites() {
+  try { favorites = (await api("/api/favorites")).items; renderFavorites(); }
+  catch (error) { errorMessage(error.message); }
+}
+
+async function editFavorites(payload) {
+  try {
+    favorites = (await api("/api/favorites", payload)).items;
+    renderFavorites(); errorMessage();
+    return true;
+  } catch (error) {
+    errorMessage(error.message);
+    return false;
+  }
+}
+
 function readPoint() {
   const lat = $("latitude"), lon = $("longitude");
   if (!lat.value || !lon.value || !lat.checkValidity() || !lon.checkValidity()) return [];
@@ -152,7 +219,7 @@ function loadMap(mode) {
   mapMode = mode;
   mapReady = false;
   $("map-mode").textContent = mode === "route" ? "绘制路线" : "地图选点";
-  $("map").src = "/picker?" + new URLSearchParams({ t: token, embed: "1", mode });
+  $("map").src = "/picker?" + new URLSearchParams({ embed: "1", mode });
   updateMapHint();
 }
 
@@ -168,8 +235,9 @@ function updateButtons() {
   const locked = !online || isBusy();
   document.querySelectorAll("[data-operation]").forEach(button => { button.disabled = locked; });
   const device = targetDevice();
-  for (const id of ["set-location", "clear-location", "set-default", "use-default"]) $(id).disabled = locked || !device;
-  if (snapshot && !(snapshot.defaults && snapshot.defaults.lat != null)) $("use-default").disabled = true;
+  for (const id of ["set-location", "clear-location", "clear-point", "set-default", "use-default"]) $(id).disabled = locked || !device;
+  if (snapshot && !snapshot.defaults) $("use-default").disabled = true;
+  $("favorite-add").disabled = !online || !point.length;
   $("start-route").disabled = locked || !device || routeDistance(points, $("loop").checked) <= .001 ||
     ["speed", "speed-noise", "position-noise"].some(id => !$(id).checkValidity());
   $("alias-form").querySelector("button").disabled = locked || !device;
@@ -185,6 +253,16 @@ function renderSession() {
   if (state.error) $("session-status").textContent += "：" + state.error;
   $("session-progress").hidden = !(state.mode === "route" && state.status === "ready" && !device.description.startsWith("stale"));
   $("session-progress").value = state.progress || 0;
+  const udid = device ? device.udid : targetDevice();
+  const tunnels = snapshot ? snapshot.tunnels : undefined;
+  $("tunnel-status").hidden = !snapshot || !udid;
+  $("tunnel-status").dataset.state = tunnels == null ? "unknown" : tunnels.includes(udid) ? "up" : "down";
+  // In rsd mode (the VPS deployment) the console cannot open a tunnel itself;
+  // the adapter builds one once the phone reaches it over Wi-Fi.
+  $("tunnel-status").textContent = tunnels == null ? "开发者通道：tunneld 没有响应" :
+    tunnels.includes(udid) ? "开发者通道：已建立" : snapshot.connection === "rsd" ?
+      "开发者通道：未建立。手机连 Wi-Fi 并打开 WireGuard 后会自动建立，蜂窝网络下无法新建。" :
+      "开发者通道：未建立，设置定位时会尝试建立。";
   $("device-hint").textContent = device ? (device.default ? "默认设备 / " : "") + device.udid : "连接设备后扫描，也可以手动输入 UDID。";
 }
 
@@ -272,12 +350,18 @@ async function fetchState() {
     online = true;
     $("connection-status").textContent = "控制台已连接";
     $("version").textContent = state.version;
+    $("host-label").hidden = !state.label;
+    $("host-label").textContent = state.label || "";
+    document.title = state.label ? `SimLocation · ${state.label}` : "SimLocation";
     $("map-provider").textContent = state.provider === "amap" ? "高德地图 / 转换为 WGS-84" : "OpenStreetMap / WGS-84";
     if (!initialized) {
       $("connection-mode").value = state.connection;
       $("debug").checked = state.debug;
+      // First visit with no draft: start on the server's default location.
+      if (!point.length && state.defaults) pickPoint(state.defaults.lat, state.defaults.lon);
     }
     renderDevices(state);
+    renderFavorites();
     initialized = true;
     $("scan-time").textContent = state.scanned_at ? "上次扫描 " + new Date(state.scanned_at * 1000).toLocaleTimeString() : "尚未扫描设备";
     renderSession(); renderJob(state.job);
@@ -302,9 +386,10 @@ function download(name, payload) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function confirmClear(title, description, action) {
+function confirmAction(title, description, button, action) {
   $("confirm-title").textContent = title;
   $("confirm-description").textContent = description;
+  $("confirm-button").textContent = button;
   const dialog = $("confirm-dialog");
   dialog.returnValue = "cancel";
   dialog.onclose = () => { if (dialog.returnValue === "confirm") action(); };
@@ -318,7 +403,19 @@ $("discover").onclick = () => perform("discover");
 $("doctor").onclick = () => perform("doctor");
 $("set-default").onclick = () => perform("device_default");
 $("alias-form").onsubmit = event => { event.preventDefault(); perform("device_add", { alias: $("alias").value.trim() }); };
-$("clear-location").onclick = () => perform("clear");
+$("clear-location").onclick = $("clear-point").onclick = () => perform("clear");
+$("favorite-form").onsubmit = async event => {
+  event.preventDefault();
+  const name = $("favorite-name").value.trim();
+  if (!point.length || !name) return;
+  $("favorite-add").disabled = true;
+  if (await editFavorites({ op: "add", name, lat: point[0][0], lon: point[0][1] })) $("favorite-name").value = "";
+  updateButtons();
+};
+$("logout").onclick = async () => {
+  try { await api("/logout", {}); } catch (_error) { /* Already signed out. */ }
+  window.location.assign("/login");
+};
 $("use-default").onclick = () => {
   const d = snapshot && snapshot.defaults;
   if (!d || d.lat == null || d.lon == null) { errorMessage("服务器未配置默认坐标（SIMLOCATION_DEFAULT_LAT / LON）。"); return; }
@@ -326,7 +423,7 @@ $("use-default").onclick = () => {
   point = readPoint(); updateDraft(); sendDraft(true);
   if (point.length) perform("set", { lat: point[0][0], lon: point[0][1] });
 };
-$("clear-all").onclick = () => confirmClear("清除全部活跃会话？", "所有设备上的运动轨迹和定点定位都将结束，恢复真实位置。", () => perform("clear_all", { confirm: true }));
+$("clear-all").onclick = () => confirmAction("清除全部活跃会话？", "所有设备上的运动轨迹和定点定位都将结束，恢复真实位置。", "确认清除", () => perform("clear_all", { confirm: true }));
 $("point-form").onsubmit = event => {
   event.preventDefault(); point = readPoint(); updateDraft(); sendDraft(true);
   if (point.length) perform("set", { lat: point[0][0], lon: point[0][1] });
@@ -366,4 +463,4 @@ window.addEventListener("message", event => {
 });
 window.addEventListener("pagehide", () => clearTimeout(pollTimer));
 restoreDraft(); updateDraft(); loadMap("point");
-poll();
+poll(); loadFavorites();

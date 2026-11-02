@@ -1597,11 +1597,26 @@ def _open_app_window(url):
     webbrowser.open(url)
 
 
+MAP_FALLBACK_VIEW = ([39.909, 116.397], 12)
+
+
+def default_map_view():
+    """Open on the configured default location (WGS-84), else on the old fallback."""
+    coords = env_default_coordinates()
+    if coords:
+        try:
+            return list(validate_coordinates(*coords)), 15
+        except ValueError:
+            pass
+    return MAP_FALLBACK_VIEW
+
+
 def render_map_html(
     amap_key=None, *, route_mode=False, speed_kmh=DEFAULT_ROUTE_SPEED_KMH,
     loop_route=False, pick_only=False,
 ):
     html_path = MAP_AMAP_HTML_PATH if amap_key else MAP_OSM_HTML_PATH
+    center, zoom = default_map_view()
     template = html_path.read_text(encoding="utf-8")
     html_text = template
     # The route editor is shared by both providers, so it lives in its own file
@@ -1615,6 +1630,8 @@ def render_map_html(
         ("{{PICK_ONLY}}", "true" if pick_only else "false"),
         ("{{ROUTE_SPEED}}", repr(float(speed_kmh))),
         ("{{MAX_ROUTE_POINTS}}", str(MAX_ROUTE_POINTS)),
+        ("{{MAP_CENTER}}", json.dumps(center)),
+        ("{{MAP_ZOOM}}", str(zoom)),
     ):
         html_text = html_text.replace(placeholder, value)
     if amap_key:
@@ -1865,6 +1882,11 @@ def build_parser():
     sub_web = subparsers.add_parser("web", help="打开常驻网页控制台")
     add_common_options(sub_web, for_subcommand=True)
     add_map_server_options(sub_web)
+    sub_web.add_argument(
+        "--hash-password",
+        action="store_true",
+        help="读取一个新密码，输出 SIMLOCATION_WEB_PASSWORD_HASH=… 一行后退出，用于常驻部署",
+    )
 
     # simlocation status
     sub_status = subparsers.add_parser("status", help="查看所有设备定位状态")

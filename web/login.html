@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <title>登录 · SimLocation</title>
+  <link rel="stylesheet" href="/console.css">
+</head>
+<body class="login-page">
+  <main class="login">
+    <p class="brand"><span class="brand-mark" aria-hidden="true">S</span>SimLocation</p>
+    <h1>登录</h1>
+    <p class="muted">{{LABEL}}</p>
+    <p id="feedback" role="alert"{{MESSAGE_HIDDEN}}>{{MESSAGE}}</p>
+    <form method="post" action="/login"{{FORM_HIDDEN}}>
+      <label for="username">用户名<input id="username" name="username" value="{{USERNAME}}" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+      <label for="password">密码<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+      <button class="primary full" type="submit">登录</button>
+    </form>
+    <p class="note"{{FORM_HIDDEN}}>密码可存进 iCloud 密码，之后由 Safari 自动填充。连续输错 5 次会锁定 15 分钟。</p>
+    <p class="note"{{LINK_HIDDEN}}>此控制台未设置密码。请使用启动时终端打印的一次性登录链接，链接只能用一次。</p>
+  </main>
+</body>
+</html>

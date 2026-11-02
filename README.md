@@ -160,6 +160,7 @@ simlocation web
 | 坐标输入 / 搜索选点 / 地图选点 | `set`, `map` |
 | 路线绘制、拖动、撤销、导入、调速、随机扰动及循环 | `route`, `--speed`, `--speed-noise`, `--position-noise`, `--loop` |
 | 导出坐标 / 路线 JSON | `map --pick-only`, `route --pick-only` |
+| 收藏地点、一键设为默认位置 | `set`（配合 `SIMLOCATION_DEFAULT_LAT/LON`） |
 | 清除单台或全部设备定位 | `clear`, `clear --all` |
 | 设备列表 / 轨迹状态监视 | `device list`, `status` |
 | 别名管理 / 默认设备配置 | `device add/remove/default` |
@@ -172,7 +173,15 @@ simlocation web --remote --port 8765
 
 ```
 
-> 网页控制台在本机和远程访问时都需要 Access Token，请使用终端打印的完整 URL。默认令牌在服务重启后更换，可通过 `SIMLOCATION_MAP_TOKEN` 指定固定令牌。坐标和路线草稿保存在 `sessionStorage` 中，刷新后可恢复。
+> **登录方式**：网址里不再携带任何令牌。未设置密码时，启动时终端会打印一条**一次性登录链接**（只能用一次、10 分钟内有效），打开后换成仅限本站点的 HttpOnly 会话 cookie；常驻部署请设置密码：
+>
+> ```bash
+> simlocation web --hash-password        # 输入两次密码，输出 SIMLOCATION_WEB_PASSWORD_HASH=… 一行
+> ```
+>
+> 把输出写进服务的环境变量后，控制台改为用户名 + 密码登录（表单可被 iCloud 密码等密码管理器保存和自动填充）。服务器只保存 scrypt 哈希；会话 7 天无操作或 30 天后失效，重启服务会让所有会话失效；同一来源连续输错 5 次锁定 15 分钟。控制台只接受 IP 地址或 `localhost` 作为主机名（防 DNS rebinding），其他主机名可用 `SIMLOCATION_WEB_HOSTS` 放行。
+>
+> 「定点」页可以收藏地点（保存在服务器的 `var/favorites.json`），配置了 `SIMLOCATION_DEFAULT_LAT/LON` 时首次打开会预填默认位置，地图也从这里开始。坐标和路线草稿保存在 `sessionStorage` 中，刷新后可恢复。
 
 ---
 
@@ -304,7 +313,11 @@ simlocation device remove myphone
 | `SIMLOCATION_START_TIMEOUT_SECONDS` | 会话启动超时时间（默认 60 秒） |
 | `SIMLOCATION_MAP_LISTEN` | 网页服务监听地址（默认 `127.0.0.1`） |
 | `SIMLOCATION_MAP_PORT` | 网页服务端口（默认自动分配） |
-| `SIMLOCATION_MAP_TOKEN` | 固定访问令牌；网页控制台始终启用鉴权，独立地图选点仅在非 loopback 监听时启用 |
+| `SIMLOCATION_MAP_TOKEN` | 独立地图选点（`map` / `route` 不带文件）在非 loopback 监听时使用的固定令牌；网页控制台不再使用 |
+| `SIMLOCATION_WEB_PASSWORD_HASH` | 网页控制台密码哈希（`simlocation web --hash-password` 生成）；设置后改为用户名 + 密码登录 |
+| `SIMLOCATION_WEB_USER` | 网页控制台用户名（默认 `simlocation`） |
+| `SIMLOCATION_WEB_LABEL` | 显示在控制台标题里的名称，多台主机时用来区分 |
+| `SIMLOCATION_WEB_HOSTS` | 额外允许的主机名（逗号分隔）；默认只接受 IP 地址和 `localhost` |
 | `SIMLOCATION_MAP_TIMEOUT_SECONDS` | 地图选点服务超时时间（默认 300 秒） |
 | `SIMLOCATION_AMAP_KEY` | [高德开放平台](https://console.amap.com/) JS API Key（配置后中国境内优先使用高德地图） |
 

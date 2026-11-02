@@ -4,13 +4,17 @@ import argparse
 import functools
 import http.client
 import importlib.util
+import io
 import json
+import os
+import re
 import tempfile
 import threading
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib.parse import urlencode
 
 from test_simlocation import simlocation as cli
 
@@ -19,6 +23,8 @@ web = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(web)
 PHONE = "00008030-000000000000000A"
 OTHER = "00008130-000000000000000C"
+PASSWORD = "correct-horse-battery-staple"
+PASSWORD_HASH = web.hash_password(PASSWORD)
 
 
 class WebConsoleTests(unittest.TestCase):
@@ -29,13 +35,21 @@ class WebConsoleTests(unittest.TestCase):
         self.stack.enter_context(patch.object(cli, "RUNTIME_DIR", self.root))
         self.stack.enter_context(patch.object(cli, "read_devices", functools.partial(cli.read_devices, self.root / "devices.json")))
         self.stack.enter_context(patch.object(cli, "write_devices", functools.partial(cli.write_devices, devices_path=self.root / "devices.json")))
+        # tunneld is never contacted; individual tests swap in a fake response.
+        self.tunneld = self.stack.enter_context(patch.object(cli.requests, "get", side_effect=ConnectionError("no tunneld")))
+        self.stack.enter_context(patch.dict(os.environ))
+        for name in ("SIMLOCATION_DEFAULT_LAT", "SIMLOCATION_DEFAULT_LON", "SIMLOCATION_WEB_LABEL"):
+            os.environ.pop(name, None)
         args = argparse.Namespace(device=None, connection="auto", debug=False, log_file=str(self.root / "debug.log"))
         self.app = web.WebConsole(cli, "/unused/pmd3", args)
+        self.now = 1000.0
         self.server = web.ThreadingHTTPServer(("127.0.0.1", 0), web.ConsoleHandler)
-        self.server.access_token = "test-token"
+        self.server.auth = web.Auth(PASSWORD_HASH, "tester", clock=lambda: self.now)
+        self.server.allowed_hosts = set()
         self.server.app = self.app
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
+        self.cookie, self.csrf = self.login()
 
     def tearDown(self):
         self.server.shutdown()
@@ -44,19 +58,35 @@ class WebConsoleTests(unittest.TestCase):
         self.app.close()
         self.stack.close()
 
-    def request(self, path="/api/state", data=None, headers=None, raw=None):
-        connection = http.client.HTTPConnection(*self.server.server_address, timeout=3)
-        body = raw if raw is not None else json.dumps(data) if data is not None else None
-        request_headers = {"X-SimLocation-Token": "test-token", "Content-Type": "application/json"}
-        if headers:
-            request_headers.update(headers)
-        connection.request("POST" if body is not None else "GET", path, body, request_headers)
+    def raw(self, method, path, body=None, headers=None):
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=5)
+        connection.request(method, path, body, headers or {})
         response = connection.getresponse()
         content = response.read()
-        json_body = content and response.getheader("Content-Type").startswith("application/json")
-        result = json.loads(content) if json_body else content.decode()
         connection.close()
-        return response.status, result
+        return response, content
+
+    def request(self, path="/api/state", data=None, headers=None, raw=None, auth=True):
+        body = raw if raw is not None else json.dumps(data) if data is not None else None
+        request_headers = {"Content-Type": "application/json"}
+        if auth:
+            request_headers.update({"Cookie": self.cookie, "X-SimLocation-CSRF": self.csrf})
+        if headers:
+            request_headers.update(headers)
+        response, content = self.raw("POST" if body is not None else "GET", path, body, request_headers)
+        json_body = content and (response.getheader("Content-Type") or "").startswith("application/json")
+        return response.status, json.loads(content) if json_body else content.decode()
+
+    def submit_login(self, username="tester", password=PASSWORD, headers=None):
+        body = urlencode({"username": username, "password": password})
+        return self.raw("POST", "/login", body, {"Content-Type": "application/x-www-form-urlencoded", **(headers or {})})
+
+    def login(self, **kwargs):
+        response, _ = self.submit_login(**kwargs)
+        self.assertEqual(response.status, 303)
+        cookie = response.getheader("Set-Cookie").split(";")[0]
+        _response, page = self.raw("GET", "/", None, {"Cookie": cookie})
+        return cookie, re.search(r'name="simloc-csrf" content="([^"]+)"', page.decode()).group(1)
 
     def operation(self, action, **data):
         return self.request("/api/action", {"action": action, **data})
@@ -66,23 +96,148 @@ class WebConsoleTests(unittest.TestCase):
         self.assertEqual(args.device, "phone")
         self.assertTrue(args.debug)
         self.assertEqual(cli.map_bind_from_args(args), ("0.0.0.0", False))
+        self.assertTrue(cli.parse_args(["web", "--hash-password"]).hash_password)
 
-    def test_token_required_for_static_and_api_even_on_loopback(self):
-        for path in ("/", "/console.js", "/console.css", "/picker?embed=1", "/api/state", "/api/state?t=test-token"):
-            self.assertEqual(self.request(path, headers={"X-SimLocation-Token": ""})[0], 403)
-        status, html = self.request("/?t=test-token", headers={"X-SimLocation-Token": ""})
+    def test_everything_but_login_requires_a_session(self):
+        response, _ = self.raw("GET", "/")
+        self.assertEqual((response.status, response.getheader("Location")), (303, "/login"))
+        # A URL token no longer grants anything.
+        response, _ = self.raw("GET", "/?t=" + self.csrf)
+        self.assertEqual(response.status, 303)
+        for path in ("/console.js", "/picker?embed=1", "/api/state", "/api/favorites"):
+            self.assertEqual(self.request(path, auth=False)[0], 401, path)
+        self.assertEqual(self.request("/api/action", {"action": "discover"}, auth=False)[0], 401)
+        self.assertEqual(self.request("/console.css", auth=False)[0], 200)
+        status, page = self.request("/login", auth=False)
         self.assertEqual(status, 200)
-        self.assertNotIn("{{", html)
-        self.assertIn("/console.js?t=test-token", html)
-        self.assertEqual(self.request("/?t=%E4%B8%AD%E6%96%87")[0], 403)
-        self.assertEqual(self.request(headers={"Origin": "https://untrusted.example"})[0], 403)
+        self.assertIn('autocomplete="current-password"', page)
+        self.assertNotIn("{{", page)
+
+    def test_login_cookie_is_httponly_strict_and_api_needs_csrf(self):
+        response, _ = self.submit_login()
+        cookie = response.getheader("Set-Cookie")
+        for attribute in ("HttpOnly", "SameSite=Strict", "Path=/"):
+            self.assertIn(attribute, cookie)
+        self.assertNotIn("Secure", cookie)
+        self.assertEqual(self.request()[0], 200)
+        self.assertEqual(self.request(headers={"X-SimLocation-CSRF": ""})[0], 401)
+        self.assertEqual(self.request(headers={"X-SimLocation-CSRF": "x" + self.csrf})[0], 401)
+        self.assertEqual(self.request(headers={"Origin": "http://evil.example"})[0], 403)
+        self.assertEqual(self.request(headers={"Sec-Fetch-Site": "cross-site"})[0], 403)
+        self.assertEqual(self.request(headers={"Sec-Fetch-Site": "same-origin"})[0], 200)
+        response, page = self.raw("GET", "/", None, {"Cookie": self.cookie})
+        self.assertIn("frame-ancestors 'self'", response.getheader("Content-Security-Policy"))
+        self.assertNotIn(b"{{", page)
+        self.assertNotIn(b"?t=", page)
+        # Each login is a fresh session; a stale page's CSRF token stops working.
+        other_cookie, other_csrf = self.login()
+        self.assertNotEqual((other_cookie, other_csrf), (self.cookie, self.csrf))
+        self.assertEqual(self.request(headers={"Cookie": other_cookie})[0], 401)
+
+    def test_wrong_credentials_are_throttled_per_client(self):
+        for _ in range(web.LOGIN_FAILURES_PER_CLIENT):
+            response, page = self.submit_login(password="wrong")
+            self.assertEqual(response.status, 401)
+            self.assertIsNone(response.getheader("Set-Cookie"))
+        response, page = self.submit_login()
+        self.assertEqual(response.status, 429)
+        self.assertIn("分钟后再试", page.decode())
+        self.assertTrue(int(response.getheader("Retry-After")) > 0)
+        self.now += web.LOGIN_WINDOW_SECONDS + 1
+        self.assertEqual(self.submit_login(username="someone", password=PASSWORD)[0].status, 401)
+        self.assertEqual(self.submit_login()[0].status, 303)
+        for body, content_type in (("password=" + "x" * 5000, "application/x-www-form-urlencoded"),
+                                   (json.dumps({"password": PASSWORD}), "application/json")):
+            response, _ = self.raw("POST", "/login", body, {"Content-Type": content_type})
+            self.assertEqual(response.status, 400)
+        self.assertEqual(self.submit_login(headers={"Origin": "http://evil.example"})[0].status, 403)
+        # A same-origin form POST under no-referrer arrives as "Origin: null";
+        # only the unforgeable Sec-Fetch-Site tells it apart from a sandboxed frame.
+        self.assertEqual(self.submit_login(headers={"Origin": "null"})[0].status, 403)
+        self.assertEqual(self.submit_login(headers={"Origin": "null", "Sec-Fetch-Site": "cross-site"})[0].status, 403)
+        self.assertEqual(self.submit_login(headers={"Origin": "null", "Sec-Fetch-Site": "same-origin"})[0].status, 303)
+        response, _ = self.raw("GET", "/login")
+        self.assertEqual(response.getheader("Referrer-Policy"), "same-origin")
+
+    def test_sessions_expire_and_logout_revokes(self):
+        self.now += web.SESSION_IDLE_SECONDS - 10
+        self.assertEqual(self.request()[0], 200)
+        self.now += web.SESSION_IDLE_SECONDS - 10
+        self.assertEqual(self.request()[0], 200, "activity extends the idle window")
+        self.now += web.SESSION_IDLE_SECONDS + 1
+        self.assertEqual(self.request()[0], 401)
+        self.cookie, self.csrf = self.login()
+        day = 24 * 3600
+        for _ in range(web.SESSION_MAX_SECONDS // (6 * day)):
+            self.now += 6 * day
+            self.assertEqual(self.request()[0], 200)
+        self.now += day + 1
+        self.assertEqual(self.request()[0], 401, "absolute lifetime is not extended by activity")
+        self.cookie, self.csrf = self.login()
+        self.assertEqual(self.request("/logout", {}, auth=False)[0], 401)
+        status, _ = self.request("/logout", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.request()[0], 401)
+        response, _ = self.raw("GET", "/login", None, {"Cookie": self.cookie})
+        self.assertEqual(response.status, 200)
+
+    def test_rebinding_host_names_are_refused(self):
+        for host in ("evil.example", "evil.example:8765", "10.77.77.1.nip.io", "[::1"):
+            self.assertEqual(self.request(headers={"Host": host})[0], 421, host)
+            self.assertEqual(self.submit_login(headers={"Host": host})[0].status, 421)
+        for host in ("localhost:1", "127.0.0.1", "10.77.77.1:8765", "[::1]:8765"):
+            self.assertEqual(self.request(headers={"Host": host})[0], 200, host)
+        self.server.allowed_hosts = {"mac.local"}
+        self.assertEqual(self.request(headers={"Host": "mac.local:8765"})[0], 200)
+
+    def test_one_time_link_without_password(self):
+        self.server.auth = web.Auth(None, clock=lambda: self.now)
+        code = self.server.auth.issue_code()
+        self.assertEqual(self.submit_login()[0].status, 400)
+        response, _ = self.raw("GET", "/login?" + urlencode({"code": "guess"}))
+        self.assertEqual(response.status, 401)
+        response, _ = self.raw("GET", "/login?" + urlencode({"code": code}))
+        self.assertEqual(response.status, 303)
+        self.assertIn("HttpOnly", response.getheader("Set-Cookie"))
+        response, page = self.raw("GET", "/login?" + urlencode({"code": code}))
+        self.assertEqual(response.status, 401)
+        self.assertIn("一次性", page.decode())
+        expired = self.server.auth.issue_code()
+        self.now += web.LOGIN_CODE_SECONDS + 1
+        self.assertIsNone(self.server.auth.redeem_code(expired))
+
+    def test_password_hash_format_and_validation(self):
+        self.assertNotIn("$", PASSWORD_HASH)
+        self.assertEqual(PASSWORD_HASH.split(":")[:4], ["scrypt", "16384", "8", "1"])
+        parsed = web.parse_password_hash(PASSWORD_HASH)
+        self.assertTrue(web.verify_password(PASSWORD, parsed))
+        self.assertFalse(web.verify_password(PASSWORD + "x", parsed))
+        self.assertNotEqual(web.hash_password(PASSWORD), PASSWORD_HASH, "salt must be random")
+        scheme, n, r, p, salt, key = PASSWORD_HASH.split(":")
+        for bad in ("", "plain-password", ":".join(["bcrypt", n, r, p, salt, key]),
+                    ":".join([scheme, str(2 ** 20), r, p, salt, key]), ":".join([scheme, n, "1", p, salt, key]),
+                    ":".join([scheme, n, r, p, "c2FsdA", key]), ":".join([scheme, "x", r, p, salt, key])):
+            with self.assertRaises(ValueError, msg=bad):
+                web.parse_password_hash(bad)
+        with self.assertRaises(ValueError):
+            web.Auth("not-a-hash")
+
+    def test_hash_password_command_reads_a_piped_password(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            web.print_password_hash(cli, io.StringIO(PASSWORD + "\n"))
+        line = output.getvalue().strip()
+        self.assertTrue(line.startswith("SIMLOCATION_WEB_PASSWORD_HASH=scrypt:"))
+        self.assertTrue(web.verify_password(PASSWORD, web.parse_password_hash(line.split("=", 1)[1])))
+        with redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            web.print_password_hash(cli, io.StringIO("short\n"))
 
     def test_only_known_assets_and_actions_are_exposed(self):
-        for path in ("/../VERSION", "/var/devices.json", "/api/logs", "/console.html"):
-            self.assertEqual(self.request(path)[0], 404)
-        # The browser asks for this on every load without a token; answering
-        # 403 would make a working console log an error against itself.
-        self.assertEqual(self.request("/favicon.ico", headers={"X-SimLocation-Token": ""}), (204, ""))
+        for path in ("/../VERSION", "/var/devices.json", "/api/logs", "/console.html", "/login.html"):
+            self.assertEqual(self.request(path)[0], 404, path)
+        # The browser asks for this on every load without credentials; answering
+        # 401 would make a working console log an error against itself.
+        self.assertEqual(self.request("/favicon.ico", auth=False), (204, ""))
         for data in ({"action": "shell"}, {"action": ["set"]}, [], None):
             status, _ = self.request("/api/action", raw=json.dumps(data))
             self.assertEqual(status, 400)
@@ -214,3 +369,67 @@ class WebConsoleTests(unittest.TestCase):
         state = self.request()[1]
         self.assertTrue(state["devices"][0]["discovered"])
         self.assertIsNotNone(state["scanned_at"])
+
+    def test_favorites_are_validated_persisted_and_never_touch_device(self):
+        with patch.object(cli, "auto_set_location") as apply:
+            status, result = self.request("/api/favorites", {"op": "add", "name": "  图书馆\n东门 ", "lat": 1.5, "lon": 2.25})
+            self.assertEqual(status, 200)
+            self.assertEqual(result["items"][0] | {"id": None}, {"id": None, "name": "图书馆 东门", "lat": 1.5, "lon": 2.25})
+            self.request("/api/favorites", {"op": "add", "name": "公园", "lat": -3, "lon": 4})
+            status, result = self.request("/api/favorites")
+            self.assertEqual([item["name"] for item in result["items"]], ["公园", "图书馆 东门"])
+            stored = json.loads((self.root / "favorites.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(stored["items"]), 2)
+            for bad in ({"op": "add", "name": "", "lat": 1, "lon": 2}, {"op": "add", "name": "x" * 61, "lat": 1, "lon": 2},
+                        {"op": "add", "name": "a\x01b", "lat": 1, "lon": 2}, {"op": "add", "name": "ok", "lat": 91, "lon": 2},
+                        {"op": "add", "name": "ok", "lat": True, "lon": 2}, {"op": "add", "name": "dup", "lat": 1.5000001, "lon": 2.25},
+                        {"op": "remove", "id": "000000000000"}, {"op": "rename"}, {"op": ["add"]}):
+                status, error = self.request("/api/favorites", bad)
+                self.assertEqual(status, 400, bad)
+            self.assertIn("图书馆 东门", self.request("/api/favorites", {"op": "add", "name": "dup", "lat": 1.5, "lon": 2.25})[1]["error"])
+            remove = result["items"][0]["id"]
+            status, result = self.request("/api/favorites", {"op": "remove", "id": remove})
+            self.assertEqual([item["name"] for item in result["items"]], ["图书馆 东门"])
+            apply.assert_not_called()
+        self.assertIsNone(self.app.job)
+        self.assertEqual(self.request("/api/favorites", {"op": "add", "name": "x", "lat": 1, "lon": 2}, auth=False)[0], 401)
+
+    def test_damaged_favorites_file_keeps_valid_rows(self):
+        (self.root / "favorites.json").write_text(json.dumps({"items": [
+            {"id": "0123456789ab", "name": "好", "lat": 1, "lon": 2}, {"id": "../etc", "name": "坏", "lat": 1, "lon": 2},
+            {"id": "0123456789ac", "name": "", "lat": 1, "lon": 2}, {"id": "0123456789ad", "name": "远", "lat": 100, "lon": 2},
+            "junk"]}), encoding="utf-8")
+        self.assertEqual([item["name"] for item in self.request("/api/favorites")[1]["items"]], ["好"])
+        (self.root / "favorites.json").write_text("{", encoding="utf-8")
+        self.assertEqual(self.request("/api/favorites")[1]["items"], [])
+        with patch.object(web, "FAVORITES_MAX", 1):
+            self.assertEqual(self.request("/api/favorites", {"op": "add", "name": "a", "lat": 1, "lon": 2})[0], 200)
+            self.assertEqual(self.request("/api/favorites", {"op": "add", "name": "b", "lat": 3, "lon": 4})[0], 400)
+
+    def test_state_reports_defaults_label_and_tunnels(self):
+        state = self.request()[1]
+        self.assertEqual((state["defaults"], state["label"], state["tunnels"]), (None, None, None))
+        with patch.dict(os.environ, {"SIMLOCATION_DEFAULT_LAT": "31.230416", "SIMLOCATION_DEFAULT_LON": "121.473701"}):
+            self.assertEqual(self.request()[1]["defaults"], {"lat": 31.230416, "lon": 121.473701})
+        with patch.dict(os.environ, {"SIMLOCATION_DEFAULT_LAT": "95", "SIMLOCATION_DEFAULT_LON": "1"}):
+            self.assertIsNone(self.request()[1]["defaults"])
+        with patch.dict(os.environ, {"SIMLOCATION_WEB_LABEL": "  hk\tvps  "}):
+            self.assertEqual(web.WebConsole(cli, "/unused", self.app.args).label, "hk vps")
+        response = MagicMock()
+        response.json.return_value = {PHONE: [{"tunnel-address": "fd00::1", "tunnel-port": 5000}],
+                                      OTHER: [], "not-a-udid": [{"tunnel-address": "fd00::2", "tunnel-port": 1}]}
+        self.tunneld.reset_mock()
+        self.tunneld.side_effect = None
+        self.tunneld.return_value = response
+        self.app.tunnel_cache = None
+        self.assertEqual(self.request()[1]["tunnels"], [PHONE])
+        self.request()
+        self.assertEqual(self.tunneld.call_count, 1, "cached between polls")
+
+    def test_picker_opens_on_the_default_location(self):
+        status, page = self.request("/picker?embed=1")
+        self.assertEqual(status, 200)
+        self.assertIn("setView([39.909, 116.397], 12)", page)
+        with patch.dict(os.environ, {"SIMLOCATION_DEFAULT_LAT": "31.230416", "SIMLOCATION_DEFAULT_LON": "121.473701"}):
+            self.assertIn("setView([31.230416, 121.473701], 15)", self.request("/picker?embed=1")[1])
+            self.assertIn("GCJ.toMap([31.230416, 121.473701])", cli.render_map_html("key").decode())

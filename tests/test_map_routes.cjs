@@ -58,7 +58,8 @@ function loadMap(provider, routeMode, loop = false, embedded = false) {
   html = html.replace("{{ROUTE_SCRIPT}}",
     fs.readFileSync(path.join(__dirname, "../web/map-route.js"), "utf8"));
   for (const [key, value] of Object.entries({ ROUTE_MODE: routeMode, ROUTE_LOOP: loop,
-    PICK_ONLY: false, ROUTE_SPEED: 5, MAX_ROUTE_POINTS: 10000, AMAP_KEY: "test-key" })) {
+    PICK_ONLY: false, ROUTE_SPEED: 5, MAX_ROUTE_POINTS: 10000, AMAP_KEY: "test-key",
+    MAP_CENTER: "[39.909, 116.397]", MAP_ZOOM: 12 })) {
     html = html.replaceAll("{{" + key + "}}", String(value));
   }
   assert.ok(!html.includes("{{"), "every template placeholder must be substituted");
