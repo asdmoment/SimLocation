@@ -18,7 +18,6 @@ directory for you to scan or import; the servers keep public keys and hashes.
 import argparse
 import base64
 import csv
-import hashlib
 import importlib.util
 import io
 import json
@@ -43,6 +42,7 @@ BUNDLE = ["VERSION", "LICENSE", "bin/simlocation.py", "bin/simlocation_web.py", 
           "deploy/network_tunneld.py", "deploy/verify_device.py", "deploy/hold_probe.py"]
 # Without 0/o and 1/l/i: four groups of six give about 119 bits.
 PASSWORD_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+PAIR_KEYS = ("private_key", "public_key")
 DEFAULTS = {"wg_port": 51820, "web_port": 8765, "mtu": 1280, "pairing_port": 49152,
             "keepalive": {"idle": 30, "interval": 30, "count": 40}, "tcp_keepalive": "30,30,40",
             "web_user": "simlocation", "default_location": None, "persistent_keepalive": 25}
@@ -146,20 +146,39 @@ def build_bundle():
     return base64.b64encode(buffer.getvalue()).decode("ascii"), (revision or "unknown") + ("-dirty" if dirty else "")
 
 
+def parse_record(data):
+    """A RemotePairing record as a dict, or None when data is anything else."""
+    try:
+        record = plistlib.loads(data)
+    except Exception:
+        return None
+    if not isinstance(record, dict):
+        return None
+    if not all(isinstance(record.get(key), bytes) and len(record[key]) == 32 for key in PAIR_KEYS):
+        return None
+    return record
+
+
 def pair_record(inventory):
-    """The RemotePairing record with the host identifier pinned, checked against a working host."""
+    """The RemotePairing record every host presents, with its host identifier pinned.
+
+    The pinned copy comes from a host where it is known to work. It is used
+    byte for byte, and only after its keys match the record on this Mac, so a
+    file swapped in on that host cannot be passed on to the others.
+    """
     phone = inventory["phone"]
-    record = plistlib.loads(Path(phone["pair_record"]).expanduser().read_bytes())
-    if "host_identifier" not in record:
-        from pymobiledevice3.pair_records import generate_host_id
-        record["host_identifier"] = generate_host_id()
-    data = plistlib.dumps(record)
+    local = parse_record(Path(phone["pair_record"]).expanduser().read_bytes())
+    if local is None:
+        raise FleetError(f"{phone['pair_record']} 不是有效的 RemotePairing 配对记录")
     reference = phone.get("pair_reference")
-    if reference:
-        known = remote(inventory, reference, "pair_digest", timeout=120).get("digest")
-        if known and known != hashlib.sha256(data).hexdigest():
-            note(f"  使用 {reference} 上已验证可用的配对记录")
-            data = base64.b64decode(remote(inventory, reference, "pair_get", timeout=120)["record"])
+    if not reference:
+        if "host_identifier" not in local:
+            raise FleetError("配对记录里没有固定的 host_identifier；把清单里的 pair_reference 设为已经能连上手机的主机")
+        return plistlib.dumps(local)
+    data = base64.b64decode(remote(inventory, reference, "pair_get", timeout=120)["record"])
+    record = parse_record(data)
+    if record is None or "host_identifier" not in record or any(record[key] != local[key] for key in PAIR_KEYS):
+        raise FleetError(f"{reference} 上的配对记录与本机的不是同一身份，已停止")
     return data
 
 

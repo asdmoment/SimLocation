@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import io
 import json
+import plistlib
 import stat
 import tarfile
 import tempfile
@@ -109,6 +110,119 @@ class RemoteHelperTests(unittest.TestCase):
         result = json.loads(output.getvalue().split(remote.RESULT_MARKER, 1)[1])
         self.assertFalse(result["ok"])
         self.assertIn("unexpected password hash format", result["error"])
+
+
+class AccountFileTests(unittest.TestCase):
+    """Files below the service accounts' homes: links they plant must not steer root."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.top = Path(self.directory.name) / "home"
+        self.top.mkdir()
+        self.secret = Path(self.directory.name) / "secret"
+        self.secret.write_text("root only")
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_read_private_refuses_links_at_any_depth(self):
+        (self.top / "pairing").mkdir()
+        (self.top / "pairing" / "device.plist").write_bytes(b"record")
+        self.assertEqual(remote.read_private(self.top / "pairing" / "device.plist", self.top), b"record")
+        self.assertIsNone(remote.read_private(self.top / "missing.json", self.top))
+        self.assertIsNone(remote.read_private(self.top / "nodir" / "x", self.top))
+        (self.top / "favorites.json").symlink_to(self.secret)
+        with self.assertRaises(OSError):
+            remote.read_private(self.top / "favorites.json", self.top)
+        (self.top / "linked").symlink_to(self.secret.parent)
+        with self.assertRaises(OSError):
+            remote.read_private(self.top / "linked" / "secret", self.top)
+
+    def test_write_file_refuses_a_link_and_leaves_no_temporary_file(self):
+        target = self.top / "web.env"
+        with patch.object(remote.os, "fchown"):
+            self.assertTrue(remote.write_file(target, "A=1\n", 0o600))
+            self.assertFalse(remote.write_file(target, "A=1\n", 0o600))
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+            link = self.top / "network.json"
+            link.symlink_to(self.secret)
+            with self.assertRaises(OSError):
+                remote.write_file(link, "{}", 0o640)
+        self.assertEqual(self.secret.read_text(), "root only")
+        self.assertEqual(sorted(p.name for p in self.top.iterdir()), ["network.json", "web.env"])
+
+    def test_account_write_script_is_atomic_and_private(self):
+        target = self.top / "pairing" / "device.plist"
+        for data in (b"first", b"second"):
+            result = remote.subprocess.run([remote.sys.executable, "-I", "-c", remote.WRITE_AS_ACCOUNT,
+                                            str(target), "600"], input=data, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_bytes(), b"second")
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+        self.assertEqual([p.name for p in target.parent.iterdir()], ["device.plist"])
+
+    def test_write_as_drops_to_the_account_and_skips_unchanged_content(self):
+        target = self.top / "devices.json"
+        target.write_text("{}")
+        with patch.object(remote.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertFalse(remote.write_as((990, 991), self.top, target, "{}"))
+            run.assert_not_called()
+            self.assertTrue(remote.write_as((990, 991), self.top, target, '{"a": 1}'))
+        command = run.call_args.args[0]
+        self.assertEqual(command[:5], ["setpriv", "--reuid=990", "--regid=991", "--clear-groups", "--inh-caps=-all"])
+        self.assertEqual(command[-2:], [str(target), "600"])
+        self.assertEqual(run.call_args.kwargs["input"], b'{"a": 1}')
+        planted = self.top / "favorites.json"
+        planted.symlink_to(self.secret)
+        with patch.object(remote.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertTrue(remote.write_as((990, 991), self.top, planted, "{}"), "a planted link never blocks a deploy")
+        self.assertEqual(run.call_args.args[0][-2], str(planted))
+
+    def test_chown_tree_never_follows_links(self):
+        (self.top / "pairing").mkdir()
+        (self.top / "pairing" / "device.plist").write_bytes(b"x")
+        (self.top / "escape").symlink_to(self.secret.parent)
+        (self.top / "shadow").symlink_to(self.secret)
+        calls = []
+        with patch.object(remote.os, "chown", side_effect=lambda *a, **k: calls.append((a[0], k))), \
+             patch.object(remote, "ensure_dir") as ensure:
+            remote.chown_tree(self.top, (990, 991))
+        ensure.assert_called_once_with(self.top, 0o700, (990, 991))
+        self.assertEqual(sorted(name for name, _ in calls), ["device.plist", "escape", "pairing", "shadow"])
+        self.assertTrue(all(k["follow_symlinks"] is False and "dir_fd" in k for _, k in calls))
+
+
+class PairRecordTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.local = Path(self.directory.name) / "remote.plist"
+        self.keys = {"private_key": b"\x01" * 32, "public_key": b"\x02" * 32, "peer_alt_irk": b"\x03" * 16}
+        self.local.write_bytes(plistlib.dumps(self.keys))
+        self.inventory = {"phone": {"pair_record": str(self.local), "pair_reference": "one"}, "hosts": {}}
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def fetched(self, data):
+        return patch.object(fleet, "remote", return_value={"record": base64.b64encode(data).decode()})
+
+    def test_reference_copy_is_used_byte_for_byte_when_its_keys_match(self):
+        pinned = plistlib.dumps({**self.keys, "host_identifier": "F00D"})
+        with self.fetched(pinned):
+            self.assertEqual(fleet.pair_record(self.inventory), pinned)
+
+    def test_anything_else_from_the_reference_is_refused(self):
+        foreign = plistlib.dumps({**self.keys, "private_key": b"\x09" * 32, "host_identifier": "F00D"})
+        for data in (b"root:x:0:0::/root:/bin/bash\n", foreign, plistlib.dumps(self.keys)):
+            with self.fetched(data), self.assertRaises(fleet.FleetError):
+                fleet.pair_record(self.inventory)
+
+    def test_without_a_reference_the_identifier_must_already_be_pinned(self):
+        self.inventory["phone"]["pair_reference"] = None
+        with self.assertRaises(fleet.FleetError):
+            fleet.pair_record(self.inventory)
+        self.local.write_bytes(plistlib.dumps({**self.keys, "host_identifier": "F00D"}))
+        self.assertEqual(plistlib.loads(fleet.pair_record(self.inventory))["host_identifier"], "F00D")
 
 
 class FleetTests(unittest.TestCase):

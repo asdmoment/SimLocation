@@ -17,12 +17,14 @@ import pwd
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 
 RESULT_MARKER = "@@SIMLOCATION-RESULT@@"
@@ -77,30 +79,143 @@ def run(*args, check=True, input=None, timeout=600, env=None):
     return result
 
 
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+def digest(data):
+    return hashlib.sha256(data).hexdigest() if data is not None else None
+
+
+def file_digest(path):
+    return digest(path.read_bytes()) if path.is_file() else None
+
+
+def open_nofollow(path, flags):
+    """Open path refusing a symbolic link as its last component; the parents must be root's."""
+    return os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC)
 
 
 def write_file(path, data, mode=0o644, owner=(0, 0)):
-    """Atomic, and private until the final chmod. True when the content changed."""
+    """Atomic write into a root-owned directory. True when the content changed.
+
+    The new file is created exclusively, gets its owner and mode through the
+    descriptor and only then replaces the old one, so it is never readable by
+    anyone else and no path is followed after the rename.
+    """
     data = data.encode("utf-8") if isinstance(data, str) else data
-    changed = not path.is_file() or path.read_bytes() != data
-    if changed:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.tmp")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        fd = open_nofollow(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        current = None
+    else:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise RuntimeError(f"{path} is not a regular file")
+            current = handle.read()
+            if current == data:
+                os.fchown(handle.fileno(), *owner)
+                os.fchmod(handle.fileno(), mode)
+                return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.fchown(handle.fileno(), *owner)
+            os.fchmod(handle.fileno(), mode)
         os.replace(temporary, path)
-    os.chown(path, *owner)
-    os.chmod(path, mode)
-    return changed
+    except BaseException:
+        with suppress(FileNotFoundError):
+            os.unlink(temporary)
+        raise
+    return True
 
 
 def ensure_dir(path, mode, owner=(0, 0)):
+    """Create or fix a directory whose parent is root's (/etc, /var/lib)."""
     path.mkdir(parents=True, exist_ok=True)
-    os.chown(path, *owner)
-    os.chmod(path, mode)
+    fd = open_nofollow(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fchown(fd, *owner)
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def read_private(path, top):
+    """Read a file below an account-owned directory without following any link.
+
+    Every component below `top` is opened relative to its parent with
+    O_NOFOLLOW, so a link the account planted cannot point root at another
+    file. Returns None when the file does not exist.
+    """
+    parts = path.relative_to(top).parts
+    fd = open_nofollow(top, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            except FileNotFoundError:
+                return None
+            os.close(fd)
+            fd = child
+        try:
+            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+        except FileNotFoundError:
+            return None
+    finally:
+        os.close(fd)
+    with os.fdopen(file_fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise RuntimeError(f"{path} is not a regular file")
+        return handle.read()
+
+
+# Runs as the owning account (see write_as): it can only touch what that
+# account could already write, whatever links it has planted.
+WRITE_AS_ACCOUNT = r"""
+import os, sys, tempfile
+path, mode = sys.argv[1], int(sys.argv[2], 8)
+data = sys.stdin.buffer.read()
+directory = os.path.dirname(path)
+os.makedirs(directory, mode=0o700, exist_ok=True)
+fd, temporary = tempfile.mkstemp(dir=directory, prefix=".fleet-")
+try:
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+        os.fchmod(handle.fileno(), mode)
+    os.replace(temporary, path)
+except BaseException:
+    os.unlink(temporary)
+    raise
+"""
+
+
+def write_as(owner, top, path, data, mode=0o600):
+    """Write a file below an account-owned directory as that account. True when it changed."""
+    data = data.encode("utf-8") if isinstance(data, str) else data
+    try:
+        if read_private(path, top) == data:
+            return False
+    except (OSError, RuntimeError):
+        pass  # a link or something other than a file: the account's own rename replaces it
+    result = subprocess.run(["setpriv", f"--reuid={owner[0]}", f"--regid={owner[1]}", "--clear-groups",
+                             "--inh-caps=-all", sys.executable, "-I", "-c", WRITE_AS_ACCOUNT,
+                             str(path), format(mode, "o")],
+                            input=data, capture_output=True, timeout=60)
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", "replace").strip()[-400:]
+        raise RuntimeError(f"writing {path} as uid {owner[0]} failed: {detail}")
+    return True
+
+
+def chown_tree(top, owner):
+    """Hand a tree to its account (migrating root-owned leftovers) without following links."""
+    for _directory, dirnames, filenames, dirfd in os.fwalk(top, follow_symlinks=False):
+        for name in dirnames + filenames:
+            os.chown(name, *owner, dir_fd=dirfd, follow_symlinks=False)
+    ensure_dir(top, 0o700, owner)
 
 
 def ensure_user(name, home):
@@ -151,8 +266,8 @@ def active_sessions():
     sessions = []
     for path in sorted(WEB_HOME.glob("*.state.json")):
         try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            state = json.loads(read_private(path, WEB_HOME) or b"{}")
+        except (OSError, ValueError, RuntimeError):
             continue
         pid = state.get("pid")
         alive = isinstance(pid, int) and pid > 0 and Path(f"/proc/{pid}").exists()
@@ -256,8 +371,8 @@ def install_code(bundle, revision):
         with tarfile.open(fileobj=io.BytesIO(base64.b64decode(bundle)), mode="r:gz") as archive:
             archive.extractall(staging, filter="data")
         (staging / "REVISION").write_text(revision + "\n", encoding="utf-8")
-        new = {p.relative_to(staging).as_posix(): digest(p) for p in staging.rglob("*") if p.is_file()}
-        old = {p.relative_to(APP).as_posix(): digest(p) for p in APP.rglob("*")
+        new = {p.relative_to(staging).as_posix(): file_digest(p) for p in staging.rglob("*") if p.is_file()}
+        old = {p.relative_to(APP).as_posix(): file_digest(p) for p in APP.rglob("*")
                if p.is_file() and "__pycache__" not in p.parts} if APP.is_dir() else {}
         changed = sorted(name for name in set(new) | set(old) if new.get(name) != old.get(name))
         if not changed:
@@ -405,17 +520,15 @@ def deploy(params):
     tunnel_owner = ensure_user("simlocation-tunnel", TUNNEL_HOME)
     ensure_dir(ETC, 0o711)
     ensure_dir(WEB_HOME, 0o700, web_owner)
-    ensure_dir(TUNNEL_HOME, 0o700, tunnel_owner)
-    for path in TUNNEL_HOME.rglob("*"):
-        os.chown(path, *tunnel_owner)
+    # Hands root-owned leftovers of the old root adapter to its account.
+    chown_tree(TUNNEL_HOME, tunnel_owner)
     report["venv_installed"] = ensure_venv(python, params["requirements"])
     changed_code = install_code(params["bundle"], params["revision"])
     report["code_changed"] = len(changed_code)
     # Before any unit points the adapter at a non-root account.
     self_test_tunnel()
 
-    ensure_dir(PAIR_RECORD.parent, 0o700, tunnel_owner)
-    pair_changed = write_file(PAIR_RECORD, base64.b64decode(params["pair_record"]), 0o600, tunnel_owner)
+    pair_changed = write_as(tunnel_owner, TUNNEL_HOME, PAIR_RECORD, base64.b64decode(params["pair_record"]))
     network = {"udid": params["udid"], "host": phone, "port": params["pairing_port"],
                "pair_record": str(PAIR_RECORD), "keepalive": params["keepalive"]}
     network_changed = write_file(ETC / "network.json", json.dumps(network, indent=2) + "\n", 0o640,
@@ -437,13 +550,14 @@ def deploy(params):
 
     devices_path = WEB_HOME / "devices.json"
     try:
-        devices = json.loads(devices_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        devices = json.loads(read_private(devices_path, WEB_HOME) or b"{}")
+    except (OSError, ValueError, RuntimeError):
         devices = {}
+    devices = devices if isinstance(devices, dict) else {}
     aliases = devices.get("aliases") if isinstance(devices.get("aliases"), dict) else {}
     aliases[params["alias"]] = params["udid"]
     devices = {"aliases": aliases, "default": devices.get("default") or params["udid"]}
-    write_file(devices_path, json.dumps(devices, ensure_ascii=False, indent=2), 0o600, web_owner)
+    write_as(web_owner, WEB_HOME, devices_path, json.dumps(devices, ensure_ascii=False, indent=2))
 
     units_changed = [name for name, text in params["units"].items() if write_file(SYSTEMD / name, text, 0o644)]
     if units_changed:
@@ -528,8 +642,8 @@ def set_password(params):
 
 
 def favorites_get(_params):
-    path = WEB_HOME / "favorites.json"
-    return {"favorites": json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None}
+    data = read_private(WEB_HOME / "favorites.json", WEB_HOME)
+    return {"favorites": json.loads(data) if data is not None else None}
 
 
 def favorites_put(params):
@@ -537,17 +651,16 @@ def favorites_put(params):
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise RuntimeError("favorites must be an object with an items list")
     owner = pwd.getpwnam("simlocation")
-    write_file(WEB_HOME / "favorites.json", json.dumps(data, ensure_ascii=False, indent=2), 0o600,
-               (owner.pw_uid, owner.pw_gid))
+    write_as((owner.pw_uid, owner.pw_gid), WEB_HOME, WEB_HOME / "favorites.json",
+             json.dumps(data, ensure_ascii=False, indent=2))
     return {"items": len(data["items"])}
 
 
-def pair_digest(_params):
-    return {"digest": digest(PAIR_RECORD)}
-
-
 def pair_get(_params):
-    return {"record": base64.b64encode(PAIR_RECORD.read_bytes()).decode("ascii")}
+    data = read_private(PAIR_RECORD, TUNNEL_HOME)
+    if data is None:
+        raise RuntimeError("no pairing record on this host")
+    return {"record": base64.b64encode(data).decode("ascii")}
 
 
 def status(_params=None):
@@ -581,7 +694,7 @@ def status(_params=None):
 def main(function, params):
     handlers = {"deploy": deploy, "set_phone_key": set_phone_key, "set_password": set_password,
                 "favorites_get": favorites_get, "favorites_put": favorites_put,
-                "pair_digest": pair_digest, "pair_get": pair_get, "status": status}
+                "pair_get": pair_get, "status": status}
     try:
         result = {"ok": True, "result": handlers[function](params)}
     except Exception as exc:
