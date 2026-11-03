@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import math
+import os
 import random
 import tempfile
 import unittest
@@ -421,6 +422,128 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         simulation.clear.assert_awaited_once()
 
 
+class ReconnectTests(unittest.IsolatedAsyncioTestCase):
+    """A session that drops after it was ready rebuilds itself from a new tunnel."""
+
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.dir = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.state_path = self.dir / "state.json"
+        for name, value in (("HOLD_WATCH_INTERVAL_SECONDS", 0.01), ("RECONNECT_RETRY_SECONDS", 0.01)):
+            self.stack.enter_context(mock.patch.object(cli, name, value))
+        self.logs = []
+        self.stack.enter_context(mock.patch.object(cli, "log_message", lambda message, *_a: self.logs.append(message)))
+        self.stack.enter_context(mock.patch.object(cli, "RemoteServiceDiscoveryService", return_value=mock.AsyncMock()))
+        self.stack.enter_context(mock.patch.object(cli, "DvtSecureSocketProxyService", return_value=mock.AsyncMock()))
+        self.stop = asyncio.Event()
+
+    def tearDown(self):
+        self.stack.close()
+
+    def simulations(self, *simulations):
+        for simulation in simulations:
+            simulation.__aenter__.return_value = simulation
+        self.stack.enter_context(mock.patch.object(cli, "LocationSimulation", side_effect=list(simulations)))
+
+    def hold(self, **kwargs):
+        return cli._hold_dvt_location_session(
+            ("fd00::1", 1001), "12.5", "123.45", self.state_path, stop_event=self.stop,
+            udid="UDID", connection_mode="rsd", **kwargs)
+
+    async def test_lost_tunnel_is_rebuilt_and_the_point_set_again(self):
+        first, second = mock.AsyncMock(), mock.AsyncMock()
+        second.set.side_effect = lambda *_a: self.stop.set()
+        self.simulations(first, second)
+        with mock.patch.object(cli, "snapshot_rsd_candidates", return_value=[]), \
+             mock.patch.object(cli, "acquire_rsd", side_effect=[None, ("fd00::2", "1002")]) as acquire:
+            await self.hold(reconnect_seconds=60)
+        first.set.assert_awaited_once_with(12.5, 123.45)
+        second.set.assert_awaited_once_with(12.5, 123.45)
+        first.clear.assert_not_awaited()  # a reconnecting session keeps the point
+        second.clear.assert_awaited_once()
+        self.assertEqual(acquire.call_count, 2)
+        state = cli.read_state(self.state_path)
+        self.assertEqual((state["status"], state["reconnects"], state["rsd_address"]), ("cleared", 1, "fd00::2"))
+        self.assertNotIn("link", state)
+        self.assertTrue(any("自动重连" in line for line in self.logs))
+
+    async def test_failed_resend_counts_as_a_drop(self):
+        lost = asyncio.Event()
+        with mock.patch.object(cli, "snapshot_rsd_candidates", return_value=[("fd00::1", "1001")]):
+            simulation = mock.AsyncMock()
+            simulation.set.side_effect = OSError("broken pipe")
+            with self.assertRaisesRegex(cli.SessionLost, "broken pipe"):
+                await cli.watch_session(simulation, ("fd00::1", 1001), "UDID", {"lat": "1", "lon": "2"},
+                                        lost, lambda: True, interval=0.01)
+            # tunneld not answering is not proof of anything; a busy route is not resent.
+            simulation.set.reset_mock()
+        with mock.patch.object(cli, "snapshot_rsd_candidates", return_value=None):
+            task = asyncio.ensure_future(cli.watch_session(simulation, ("fd00::1", 1001), "UDID", {}, lost,
+                                                           lambda: False, interval=0.01))
+            await asyncio.sleep(0.05)
+            lost.set()
+            await task
+        simulation.set.assert_not_awaited()
+
+    async def test_gives_up_after_the_window_and_reports_why(self):
+        self.simulations(mock.AsyncMock())
+        with mock.patch.object(cli, "snapshot_rsd_candidates", return_value=[]), \
+             mock.patch.object(cli, "acquire_rsd", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "没能重连.*不再提供"):
+                await self.hold(reconnect_seconds=0.05)
+        state = cli.read_state(self.state_path)
+        self.assertEqual(state["link"], "reconnecting")
+
+    async def test_stop_while_reconnecting_ends_without_touching_the_device(self):
+        first = mock.AsyncMock()
+        self.simulations(first)
+
+        def no_tunnel(*_a):
+            self.stop.set()
+            return None
+
+        with mock.patch.object(cli, "snapshot_rsd_candidates", return_value=[]), \
+             mock.patch.object(cli, "acquire_rsd", side_effect=no_tunnel):
+            await self.hold(reconnect_seconds=60)
+        first.clear.assert_not_awaited()
+        self.assertFalse(cli.read_state(self.state_path).get("clear_confirmed"))
+
+    async def test_failure_before_ready_is_not_retried(self):
+        first = mock.AsyncMock()
+        first.set.side_effect = RuntimeError("no developer image")
+        self.simulations(first)
+        with mock.patch.object(cli, "acquire_rsd") as acquire:
+            with self.assertRaisesRegex(RuntimeError, "no developer image"):
+                await self.hold(reconnect_seconds=60)
+        acquire.assert_not_called()
+
+    async def test_resumed_route_follows_wall_time(self):
+        simulation = mock.AsyncMock()
+        simulation.set.side_effect = lambda *_a: None
+        state = {}
+        stop = asyncio.Event()
+
+        async def set_once(*_a):
+            if simulation.set.await_count >= 1:
+                stop.set()
+
+        simulation.set.side_effect = set_once
+        await cli.play_route(simulation, cli.Route([[0, 0], [0, 1]]), 3.6, False, stop, state,
+                             self.state_path, clock=lambda: 130.0, started=30.0)
+        self.assertAlmostEqual(state["distance_m"], 100.0)
+
+    def test_window_comes_from_the_environment(self):
+        with mock.patch.dict(os.environ, {"SIMLOCATION_RECONNECT_SECONDS": "0"}):
+            self.assertEqual(cli.get_reconnect_seconds(), 0)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SIMLOCATION_RECONNECT_SECONDS", None)
+            self.assertEqual(cli.get_reconnect_seconds(), cli.DEFAULT_RECONNECT_SECONDS)
+        for bad in ("-1", "soon", "inf", "nan"):
+            with mock.patch.dict(os.environ, {"SIMLOCATION_RECONNECT_SECONDS": bad}):
+                with self.assertRaises(ValueError, msg=bad):
+                    cli.get_reconnect_seconds()
+
+
 class RouteStatusTests(unittest.TestCase):
     def test_current_speed_is_shown_when_noise_is_active(self):
         text = self.describe({"mode": "route", "speed_kmh": 12, "current_speed_kmh": 11.5})
@@ -443,6 +566,12 @@ class RouteStatusTests(unittest.TestCase):
     def test_completed_route_reports_a_held_endpoint(self):
         text = self.describe({"mode": "route", "route_phase": "completed"})
         self.assertIn("已到终点", text)
+
+    def test_reconnecting_session_says_so(self):
+        text = self.describe({"link": "reconnecting", "reconnect_since": "2026-11-03T10:00:00",
+                              "reconnect_deadline": "2026-11-03T10:30:00"})
+        self.assertTrue(text.startswith("重连中 (1.000000, 2.000000)"))
+        self.assertIn("10:30:00", text)
 
     def test_plain_session_is_unchanged(self):
         self.assertEqual(self.describe({}), "ready (1.000000, 2.000000)")

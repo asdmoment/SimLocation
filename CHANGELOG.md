@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 定位会话断线后自动重连：会话建立后，每 10 秒检查一次隧道是否还在，静止定位还会顺带重发一次坐标。断线后 30 分钟内（`SIMLOCATION_RECONNECT_SECONDS`）每隔几秒尝试拿新隧道，连上后重新设定位；轨迹按原来的开始时间续上。重连期间 `status` 和网页控制台显示「重连中」。
+- 网页控制台的地图选点不再依赖外部站点：Leaflet 随仓库提供，瓦片和地址搜索由控制台代取。手机只能访问 VPS 时（严格模式）也能用。
+- 新增 `SimLocation-strict` 手机配置：所有流量进隧道，由 VPS 丢弃，WireGuard 打开期间除 SimLocation 外其他 App 断网，不会绕开 Surge 直连。各主机的防火墙不转发任何进出 `wg-simloc` 的包。
 - 新增远程部署 `deploy/`：手机装官方 WireGuard 连到 VPS 后，**只用手机**就能设定位或清除。`deploy/fleet.py` 在 Mac 上用一条命令部署和运维多台 VPS，内容包括 WireGuard、tunneld 适配器、网页控制台和 nftables 出站过滤。手机只需导入一个 WireGuard 配置，就能同时连上全部主机，任意一台都可以使用。手机密钥和控制台密码在本机生成，服务器只保存公钥和 scrypt 哈希；工具会输出二维码，以及可导入「密码」App 的 CSV。系统 python3 没有 TLS-PSK 时，自动安装 deadsnakes 的 Python 3.14。
 - 网页控制台改为密码登录，凭据不再出现在 URL 里：
   - 会话 cookie 设为 `HttpOnly; SameSite=Strict`，`/api/*` 另需 CSRF 头。

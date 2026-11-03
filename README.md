@@ -311,6 +311,7 @@ simlocation device remove myphone
 | `SIMLOCATION_VAR_DIR` | 自定义运行时数据文件存放目录（默认 `var/`） |
 | `SIMLOCATION_TUNNELD_URL` | 自定义 `tunneld` 服务地址（默认 `http://127.0.0.1:49151`） |
 | `SIMLOCATION_START_TIMEOUT_SECONDS` | 会话启动超时时间（默认 60 秒） |
+| `SIMLOCATION_RECONNECT_SECONDS` | 会话建立后断线时，自动重连的最长时间（默认 1800 秒，0 表示不重连） |
 | `SIMLOCATION_TCP_KEEPALIVE` | 后台会话设备连接的 keepalive，格式「空闲秒,间隔秒,次数」，例如 `30,30,40`（约 20 分钟无响应才断开）；不设置时沿用 pymobiledevice3 的约 12 秒。远程（VPS）部署用，手机切到蜂窝后连接断了就无法重建 |
 | `SIMLOCATION_MAP_LISTEN` | 网页服务监听地址（默认 `127.0.0.1`） |
 | `SIMLOCATION_MAP_PORT` | 网页服务端口（默认自动分配） |

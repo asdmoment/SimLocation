@@ -23,7 +23,7 @@ import webbrowser
 import xml.etree.ElementTree as ET
 from bisect import bisect_right
 from contextlib import asynccontextmanager, redirect_stderr, suppress
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlsplit, parse_qs, quote
 from importlib import metadata as importlib_metadata
@@ -92,6 +92,12 @@ HOLD_POLL_INTERVAL_SECONDS = 0.25
 # the progress shown by `status`, so it is deliberately human-scaled rather
 # than as fast as the DVT channel would allow.
 ROUTE_UPDATE_INTERVAL_SECONDS = 1.0
+HOLD_WATCH_INTERVAL_SECONDS = 10.0
+HOLD_WATCH_SET_TIMEOUT_SECONDS = 10.0
+# A dropped session rebuilds itself from a fresh tunnel for this long
+# (SIMLOCATION_RECONNECT_SECONDS; 0 turns it off), retrying every few seconds.
+DEFAULT_RECONNECT_SECONDS = 1800
+RECONNECT_RETRY_SECONDS = 5.0
 MAX_ROUTE_POINTS = 10000
 MAX_ROUTE_BYTES = 4 * 1024 * 1024
 EARTH_RADIUS_METERS = 6371008.8
@@ -1155,12 +1161,17 @@ async def clear_held_location(simulation, state_path):
 
 async def play_route(
     simulation, route, speed_kmh, loop_route, stop_event, state, state_path,
-    clock=time.monotonic, *, speed_noise=0.0, position_noise=0.0, rng=None,
+    clock=time.monotonic, *, speed_noise=0.0, position_noise=0.0, rng=None, started=None,
 ):
-    """Walk using elapsed time, optionally varying speed and position smoothly."""
+    """Walk using elapsed time, optionally varying speed and position smoothly.
+
+    started lets a reconnected session resume: position follows the time since
+    the route first began, so an outage skips ahead instead of pausing the walk.
+    """
     validate_route_noise(speed_noise, position_noise)
     noise = RouteNoise(rng) if speed_noise or position_noise else None
-    started = clock()
+    if started is None:
+        started = clock()
     while not stop_event.is_set():
         elapsed = clock() - started
         variation, integral, east, north = noise.sample(elapsed) if noise else (0, 0, 0, 0)
@@ -1198,11 +1209,138 @@ async def play_route(
             await asyncio.wait_for(stop_event.wait(), timeout=ROUTE_UPDATE_INTERVAL_SECONDS)
 
 
+class SessionLost(RuntimeError):
+    """The DVT connection behind a held location is gone."""
+
+
+def get_reconnect_seconds():
+    raw_value = os.environ.get("SIMLOCATION_RECONNECT_SECONDS")
+    if raw_value is None or not raw_value.strip():
+        return float(DEFAULT_RECONNECT_SECONDS)
+    try:
+        seconds = float(raw_value)
+    except ValueError as exc:
+        raise ValueError("SIMLOCATION_RECONNECT_SECONDS 必须是不小于 0 的数字（0 表示不自动重连）。") from exc
+    if not seconds >= 0 or math.isinf(seconds):
+        raise ValueError("SIMLOCATION_RECONNECT_SECONDS 必须是不小于 0 的数字（0 表示不自动重连）。")
+    return seconds
+
+
+async def watch_session(simulation, rsd_pair, udid, state, stop_event, resend, interval=None):
+    """Notice a dead connection while nothing else is talking to the device.
+
+    A held point sends nothing after the first set, so a dropped tunnel would
+    go unnoticed while the phone quietly returns to its real location. Every
+    interval this checks that tunneld still lists our RSD and, when resend()
+    says the session is idle, sends the current point again.
+    """
+    pair = (str(rsd_pair[0]), int(rsd_pair[1]))
+    interval = HOLD_WATCH_INTERVAL_SECONDS if interval is None else interval
+    while True:
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        if stop_event.is_set():
+            return
+        candidates = await asyncio.to_thread(snapshot_rsd_candidates, udid, None, 1)
+        # None means tunneld did not answer: not proof the tunnel is gone.
+        if candidates is not None and pair not in {(str(a), int(p)) for a, p in candidates}:
+            raise SessionLost("tunneld 已不再提供这条 RSD 隧道")
+        if resend():
+            try:
+                await asyncio.wait_for(
+                    simulation.set(float(state["lat"]), float(state["lon"])), HOLD_WATCH_SET_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                raise SessionLost(f"重发定位失败: {exc or type(exc).__name__}") from exc
+
+
+async def _hold_one_connection(
+    rsd_pair, state, state_path, stop_event, log_path, *, udid, route, route_clock, speed_kmh,
+    loop_route, speed_noise, position_noise, reconnecting, clear_on_failure,
+):
+    """One DVT connection: set the point (or resume the route) and hold it.
+
+    Returns True after a requested stop cleared the location, False when the
+    stop arrived before anything was set. Raises when the connection fails.
+    """
+    async with developer_rsd(rsd_pair, log_path) as rsd:
+        async with DvtSecureSocketProxyService(rsd) as dvt:
+            async with LocationSimulation(dvt) as simulation:
+                if stop_event.is_set():
+                    log_message("[*] 启动期间收到停止请求，未设置定位。", log_path)
+                    return False
+                await simulation.set(float(state["lat"]), float(state["lon"]))
+                state.update(status="ready", pid=os.getpid(), rsd_address=rsd_pair[0], rsd_port=rsd_pair[1])
+                if reconnecting:
+                    state["reconnects"] = state.get("reconnects", 0) + 1
+                    state["reconnected_at"] = datetime.now().isoformat(timespec="seconds")
+                for key in ("link", "reconnect_since", "reconnect_deadline", "disconnect_reason"):
+                    state.pop(key, None)
+                write_state(state_path, state)
+                if reconnecting:
+                    log_message("[+] 已重新连上设备，定位已恢复。", log_path)
+                elif route:
+                    log_message(
+                        f"[+] 后台运动轨迹会话已建立，{route.total_m:.0f} m / {speed_kmh:g} km/h，直到执行 clear。",
+                        log_path,
+                    )
+                else:
+                    log_message("[+] 后台定位会话已建立，将持续保持当前位置直到执行 clear。", log_path)
+                if route_clock["started"] is None:
+                    route_clock["started"] = route_clock["clock"]()
+
+                def idle():
+                    return not route or state.get("route_phase") == "completed"
+
+                if route:
+                    main = play_route(
+                        simulation, route, speed_kmh, loop_route, stop_event, state, state_path,
+                        clock=route_clock["clock"], started=route_clock["started"],
+                        speed_noise=speed_noise, position_noise=position_noise,
+                    )
+                else:
+                    main = stop_event.wait()
+                tasks = [asyncio.ensure_future(main)]
+                if udid:
+                    tasks.append(asyncio.ensure_future(
+                        watch_session(simulation, rsd_pair, udid, state, stop_event, idle)))
+                try:
+                    try:
+                        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        for task in tasks:
+                            task.cancel()
+                        for task in tasks:
+                            with suppress(asyncio.CancelledError, Exception):
+                                await task
+                    for task in done:
+                        task.result()
+                    if not stop_event.is_set():
+                        raise SessionLost("定位会话意外结束")
+                except BaseException:
+                    # Without reconnecting, dropping out would strand the device
+                    # at a fake location, so try once before propagating.
+                    # Best-effort only: the same fault usually breaks clear too.
+                    if clear_on_failure:
+                        with suppress(Exception):
+                            await simulation.clear()
+                    raise
+                await clear_held_location(simulation, state_path)
+                return True
+
+
 async def _hold_dvt_location_session(
     rsd_pair, lat, lon, state_path, log_path=None, stop_event=None,
     *, route=None, speed_kmh=DEFAULT_ROUTE_SPEED_KMH, loop_route=False,
-    speed_noise=0.0, position_noise=0.0,
+    speed_noise=0.0, position_noise=0.0, udid=None, connection_mode="rsd",
+    reconnect_seconds=0.0, clock=time.monotonic,
 ):
+    """Hold a point or replay a route until stopped.
+
+    With a udid and reconnect_seconds > 0, a connection that drops after the
+    session was ready is rebuilt from a fresh tunnel for up to that long; the
+    point is set again and a route resumes where wall time says it should be.
+    """
     if stop_event is None:
         stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1216,63 +1354,61 @@ async def _hold_dvt_location_session(
         except NotImplementedError:
             signal.signal(sig, lambda *_: request_stop())
 
-    async with developer_rsd(rsd_pair, log_path) as rsd:
-        async with DvtSecureSocketProxyService(rsd) as dvt:
-            async with LocationSimulation(dvt) as simulation:
-                if stop_event.is_set():
-                    log_message("[*] 启动期间收到停止请求，未设置定位。", log_path)
-                    return
-                await simulation.set(float(lat), float(lon))
-                state = {
-                    "status": "ready",
-                    "pid": os.getpid(),
-                    "rsd_address": rsd_pair[0],
-                    "rsd_port": rsd_pair[1],
-                    "lat": str(lat),
-                    "lon": str(lon),
-                    "started_at": datetime.now().isoformat(timespec="seconds"),
-                }
-                if route:
-                    state.update(
-                        mode="route",
-                        route_phase="moving",
-                        speed_kmh=speed_kmh,
-                        speed_noise=speed_noise,
-                        position_noise=position_noise,
-                        loop=loop_route,
-                        total_m=route.total_m,
-                        distance_m=0.0,
-                        progress=0.0,
-                        lap=1,
-                    )
-                write_state(state_path, state)
-                try:
-                    if route:
-                        log_message(
-                            f"[+] 后台运动轨迹会话已建立，{route.total_m:.0f} m / "
-                            f"{speed_kmh:g} km/h，直到执行 clear。",
-                            log_path,
-                        )
-                        await play_route(
-                            simulation, route, speed_kmh, loop_route,
-                            stop_event, state, state_path,
-                            speed_noise=speed_noise, position_noise=position_noise,
-                        )
-                    else:
-                        log_message(
-                            "[+] 后台定位会话已建立，将持续保持当前位置直到执行 clear。",
-                            log_path,
-                        )
-                        await stop_event.wait()
-                except BaseException:
-                    # A moving session can fail mid-flight (device unplugged,
-                    # DVT error). Dropping out without clearing would strand the
-                    # device at a fake location, so try once before propagating.
-                    # Best-effort only: the same fault usually breaks clear too.
-                    with suppress(Exception):
-                        await simulation.clear()
-                    raise
-                await clear_held_location(simulation, state_path)
+    state = {
+        "status": "connecting",
+        "pid": os.getpid(),
+        "lat": str(lat),
+        "lon": str(lon),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if route:
+        state.update(
+            mode="route", route_phase="moving", speed_kmh=speed_kmh, speed_noise=speed_noise,
+            position_noise=position_noise, loop=loop_route, total_m=route.total_m,
+            distance_m=0.0, progress=0.0, lap=1,
+        )
+    route_clock = {"started": None, "clock": clock}
+    can_reconnect = bool(udid) and reconnect_seconds > 0
+    deadline = None
+    while True:
+        try:
+            await _hold_one_connection(
+                rsd_pair, state, state_path, stop_event, log_path, udid=udid, route=route,
+                route_clock=route_clock, speed_kmh=speed_kmh, loop_route=loop_route,
+                speed_noise=speed_noise, position_noise=position_noise, reconnecting=deadline is not None,
+                clear_on_failure=not can_reconnect,
+            )
+            return
+        except Exception as exc:
+            if stop_event.is_set() or not can_reconnect or route_clock["started"] is None:
+                raise
+            reason = str(exc) or type(exc).__name__
+            if deadline is None:
+                deadline = clock() + reconnect_seconds
+                log_message(f"[!] 定位会话断开（{reason}），{reconnect_seconds:g} 秒内会自动重连。", log_path)
+                state.update(
+                    link="reconnecting",
+                    reconnect_since=datetime.now().isoformat(timespec="seconds"),
+                    reconnect_deadline=(datetime.now() + timedelta(seconds=reconnect_seconds)).isoformat(timespec="seconds"),
+                )
+            state["disconnect_reason"] = reason
+            write_state(state_path, state)
+        rsd_pair = None
+        while rsd_pair is None:
+            if stop_event.is_set():
+                log_message("[*] 重连期间收到停止请求，后台会话结束。", log_path)
+                return
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise RuntimeError(f"断线后 {reconnect_seconds:g} 秒内没能重连（{state.get('disconnect_reason')}）")
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=min(RECONNECT_RETRY_SECONDS, remaining))
+            if stop_event.is_set():
+                continue
+            try:
+                rsd_pair = await asyncio.to_thread(acquire_rsd, udid, connection_mode, None)
+            except Exception:
+                rsd_pair = None
 
 
 def run_hold_session(
@@ -1295,6 +1431,7 @@ def run_hold_session(
     )
 
     try:
+        reconnect_seconds = get_reconnect_seconds()
         apply_tcp_keepalive(log_path)
         udid = resolve_device_udid(pmd3_bin, log_path)
         rsd_pair = acquire_rsd(udid, connection_mode, log_path)
@@ -1306,6 +1443,7 @@ def run_hold_session(
                 rsd_pair, lat, lon, state_path, log_path,
                 route=route, speed_kmh=speed_kmh, loop_route=loop_route,
                 speed_noise=speed_noise, position_noise=position_noise,
+                udid=udid, connection_mode=connection_mode, reconnect_seconds=reconnect_seconds,
             )
         )
         state = read_state(state_path) or {}
@@ -1323,7 +1461,7 @@ def run_hold_session(
             }
         )
         write_state(state_path, state)
-        log_message(f"[-] 后台定位会话启动失败: {exc}", log_path)
+        log_message(f"[-] 后台定位会话{'中断' if state.get('started_at') and state.get('rsd_address') else '启动失败'}: {exc}", log_path)
         raise
     finally:
         remove_file_if_exists(pid_path)
@@ -2166,6 +2304,8 @@ def describe_session_state(state):
         pid = state.get("pid")
         if not is_process_alive(pid):
             return f"stale (进程 {pid} 已退出，定位可能仍在生效，请执行 clear)"
+        if state.get("link") == "reconnecting":
+            return f"重连中 ({lat}, {lon})，断开于 {state.get('reconnect_since', '?')[11:]}，最晚 {state.get('reconnect_deadline', '?')[11:]} 放弃"
         if state.get("mode") == "route":
             if state.get("route_phase") == "completed":
                 return f"已到终点，保持定位 ({lat}, {lon})"

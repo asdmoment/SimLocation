@@ -14,7 +14,7 @@
 | JitStreamer-EB（已归档） | 配对文件 → WireGuard → lockdownd 62078 → CoreDeviceProxy | 不通：作者在同系列项目 jkipsec 的 README 里写明，WireGuard utun 的策略会挡入站 lockdown（62078），后来 IPsec 也被挡；本项目实测 62078 同样被拒 | 借鉴整体形态；避开它的 `CorsLayer` 任意来源、默认开放 `/register` 这类设计，控制台改为同源校验、密码登录，不提供注册接口 |
 | jkipsec | IPsec 隧道代替 WireGuard | 作者自述后来也被挡 | 只作为「换 VPN 协议绕不过系统策略」的佐证 |
 | netmuxd | 网络版 usbmuxd，经 lockdown 连接网络设备 | 依赖 62078，跨子网经 VPN 不通 | 不用 |
-| ios-location-server | lockdown TCP + CoreDeviceTunnelProxy + 用户态隧道，DVT 前先 `auto_mount`，带断线重连 | 依赖 lockdown，不适用于经 VPN 远程；作者在 iOS 18.5 上测得锁屏约 100 秒后深睡，模拟定位不保持 | 借鉴 `auto_mount`（手机重启后自动挂载开发者镜像，已实现）；断线重连尚未实现 |
+| ios-location-server | lockdown TCP + CoreDeviceTunnelProxy + 用户态隧道，DVT 前先 `auto_mount`，带断线重连 | 依赖 lockdown，不适用于经 VPN 远程；作者在 iOS 18.5 上测得锁屏约 100 秒后深睡，模拟定位不保持 | 借鉴 `auto_mount`（手机重启后自动挂载开发者镜像，已实现）和断线重连（已实现：会话建立后断线，30 分钟内自动重连并重新设定位，轨迹按时间续上） |
 | omarchy `tailnet-tunnel.py` | tailnet → RemotePairing 49152，TLS-PSK TCP 隧道 | 可用（作者测于 iOS 27.0.1）：62078 只认同子网来源；纯蜂窝下 49152–49167 全部拒绝；熄屏数小时后隧道和截图仍可用，但启动 App 失败；TCP 隧道需要 Python 3.13+ 且带 TLS-PSK | 借鉴 49152–49167 端口回退（已实现）、固定 host_identifier（已在用）；按它的提醒，Ubuntu 24.04 主机改装 deadsnakes 的 Python 3.14 |
 | StikDebug / LiveContainer | 手机上的 App 经本机回环访问自己的开发者服务，主要用于 JIT | 本项目实测 iOS 27.2 的 RemotePairing 策略禁止 loopback 类型的新连接；它们走的 lockdown 路径是否受影响，本项目没有验证 | 与远程设定位无关 |
 | pymobiledevice3 11.49.2 | 上面多数方案的底层库 | — | 直接依赖；用它的用户态隧道做了下面的并发测试 |
