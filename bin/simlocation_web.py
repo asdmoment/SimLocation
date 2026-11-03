@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from collections import deque
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -160,6 +161,18 @@ class MapProxy:
         if not isinstance(results, list):
             raise MapUnavailable("unexpected search response")
         return json.dumps(results, ensure_ascii=False).encode("utf-8")
+
+
+AUTO_SET_POLL_SECONDS = 3.0
+# Only a tunnel that was gone this long counts as "WireGuard was just turned
+# on"; the short gap of a Wi-Fi change does not, so a cleared point stays cleared.
+AUTO_SET_MIN_ABSENCE_SECONDS = 60.0
+AUTO_SET_PENDING_SECONDS = 120.0
+AUTO_SET_NOTE = "[*] 手机的开发者通道刚建立，自动设到默认位置。"
+
+
+def auto_set_enabled():
+    return os.environ.get("SIMLOCATION_WEB_AUTO_SET", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class BusyError(ValueError):
@@ -395,13 +408,21 @@ class WebConsole:
                 self.tunnel_cache = (now, value)
             return self.tunnel_cache[1]
 
+    def preferred_udid(self, config=None):
+        config = config or self.cli.read_devices()
+        requested = self.args.device or os.environ.get("SIMLOCATION_UDID") or config.get("default")
+        return self.cli.resolve_alias(requested, config) if requested else None
+
+    def session_running(self, udid):
+        state = self.cli.read_state(self.cli.state_path_for(udid)) or {}
+        return state.get("status") in ("starting", "ready", "clearing") and self.cli.is_process_alive(state.get("pid"))
+
     def state(self):
         cli = self.cli
         config = cli.read_devices()
         default = config.get("default")
         default_udid = cli.resolve_alias(default, config) if default else None
-        requested = self.args.device or os.environ.get("SIMLOCATION_UDID") or default
-        preferred = cli.resolve_alias(requested, config) if requested else None
+        preferred = self.preferred_udid(config)
         with self.lock:
             discovered = list(self.discovered)
             job = copy.deepcopy(self.job)
@@ -431,6 +452,7 @@ class WebConsole:
             "provider": "amap" if os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() else "osm",
             "max_route_bytes": cli.MAX_ROUTE_BYTES, "max_route_points": cli.MAX_ROUTE_POINTS,
             "defaults": self.default_point(), "tunnels": self.tunnel_status(),
+            "auto_set": auto_set_enabled(),
         }
 
     def favorites_path(self):
@@ -574,14 +596,15 @@ class WebConsole:
         if failed:
             raise ValueError("部分设备清除失败，请重试：" + ", ".join(failed))
 
-    def submit(self, data):
+    def submit(self, data, note=None):
         with self.lock:
             if self.job and self.job["status"] == "running":
                 raise BusyError("已有操作正在执行，请等待结果。")
             action, udid, log_path, callback = self.prepare(data)
             self.sequence += 1
             self.job = {"id": self.sequence, "action": action, "device": udid,
-                        "status": "running", "messages": [], "result": None}
+                        "status": "running", "messages": [note] if note else [], "result": None,
+                        "auto": bool(note)}
             self.worker = threading.Thread(target=self.execute, args=(callback, log_path))
             self.worker.start()
             return copy.deepcopy(self.job)
@@ -609,6 +632,66 @@ class WebConsole:
     def close(self):
         if self.worker:
             self.worker.join()
+
+
+class AutoSetter:
+    """Sets the default point once when the phone's developer tunnel appears.
+
+    The tunnel appears when WireGuard comes up on Wi-Fi. A tunnel counts as new
+    only after it was absent for AUTO_SET_MIN_ABSENCE_SECONDS, and a running
+    session (held, moving or reconnecting) is never replaced. Enable it on one
+    host only: each host holds its own session, and several would fight.
+    """
+
+    def __init__(self, app, clock=time.monotonic):
+        self.app, self.clock = app, clock
+        # Startup counts as the start of an absence, so a tunnel that is already
+        # up when the console (re)starts is not treated as a fresh connection.
+        self.absent_since = clock()
+        self.pending_until = None
+        self.stopped = threading.Event()
+
+    def tick(self):
+        tunnels = self.app.tunnel_status()
+        if tunnels is None:
+            return None  # tunneld did not answer: nothing learned
+        udid = self.app.preferred_udid()
+        now = self.clock()
+        if not udid or udid not in tunnels:
+            if self.absent_since is None:
+                self.absent_since = now
+            self.pending_until = None
+            return None
+        if self.absent_since is not None:
+            if now - self.absent_since >= AUTO_SET_MIN_ABSENCE_SECONDS:
+                self.pending_until = now + AUTO_SET_PENDING_SECONDS
+            self.absent_since = None
+        if self.pending_until is None:
+            return None
+        if now > self.pending_until:
+            self.pending_until = None
+            return "expired"
+        if self.app.session_running(udid):
+            self.pending_until = None
+            return "running"
+        point = self.app.default_point()
+        if not point:
+            self.pending_until = None
+            return "no-default"
+        try:
+            self.app.submit({"action": "set", "device": udid, **point}, note=AUTO_SET_NOTE)
+        except BusyError:
+            return "busy"  # another operation is running; try again next tick
+        except ValueError:
+            self.pending_until = None
+            return "invalid"
+        self.pending_until = None
+        return "submitted"
+
+    def run(self):
+        while not self.stopped.wait(AUTO_SET_POLL_SECONDS):
+            with suppress(Exception):
+                self.tick()
 
 
 def cookie_value(header, name):
@@ -961,6 +1044,14 @@ def run_web_console(cli, args, pmd3_bin):
         cli.log_message("[*] 一次性登录链接：只能用一次，10 分钟内有效。常驻部署请设置 SIMLOCATION_WEB_PASSWORD_HASH。")
     for url in urls:
         print(f"    {url}", flush=True)
+    auto_setter = None
+    if auto_set_enabled():
+        if server.app.default_point():
+            auto_setter = AutoSetter(server.app)
+            threading.Thread(target=auto_setter.run, daemon=True).start()
+            cli.log_message("[*] 已开启：手机连上 WireGuard、开发者通道建立后，自动设到默认位置。")
+        else:
+            cli.log_message("[!] SIMLOCATION_WEB_AUTO_SET 已开启，但没有有效的默认坐标，自动设定位不会生效。")
     server.app.submit({"action": "discover"})
     if open_browser and cli.is_loopback_host(listen):
         cli._open_app_window(urls[0])
@@ -969,5 +1060,7 @@ def run_web_console(cli, args, pmd3_bin):
     except KeyboardInterrupt:
         cli.log_message("[*] 正在关闭网页服务，等待当前操作完成。")
     finally:
+        if auto_setter:
+            auto_setter.stopped.set()
         server.server_close()
         server.app.close()

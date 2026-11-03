@@ -40,7 +40,8 @@ class WebConsoleTests(unittest.TestCase):
         # tunneld is never contacted; individual tests swap in a fake response.
         self.tunneld = self.stack.enter_context(patch.object(cli.requests, "get", side_effect=ConnectionError("no tunneld")))
         self.stack.enter_context(patch.dict(os.environ))
-        for name in ("SIMLOCATION_DEFAULT_LAT", "SIMLOCATION_DEFAULT_LON", "SIMLOCATION_WEB_LABEL"):
+        for name in ("SIMLOCATION_DEFAULT_LAT", "SIMLOCATION_DEFAULT_LON", "SIMLOCATION_WEB_LABEL",
+                     "SIMLOCATION_WEB_AUTO_SET", "SIMLOCATION_UDID"):
             os.environ.pop(name, None)
         args = argparse.Namespace(device=None, connection="auto", debug=False, log_file=str(self.root / "debug.log"))
         self.app = web.WebConsole(cli, "/unused/pmd3", args)
@@ -171,6 +172,85 @@ class WebConsoleTests(unittest.TestCase):
         self.assertEqual(self.tunneld.call_args.kwargs["headers"]["Accept-Language"], "zh-CN,zh,en")
         self.assertEqual(self.request("/map/search?q=" + "a" * 201)[0], 400)
         self.assertEqual(self.request("/map/search")[0], 400)
+
+    def auto_setter(self, tunnels):
+        os.environ.update(SIMLOCATION_UDID=PHONE, SIMLOCATION_DEFAULT_LAT="12.5", SIMLOCATION_DEFAULT_LON="123.45")
+        clock = [0.0]
+        setter = web.AutoSetter(self.app, clock=lambda: clock[0])
+        self.app.tunnel_status = lambda: tunnels[0]
+        submitted = []
+
+        def submit(data, note=None):
+            submitted.append((data, note))
+            return {}
+
+        self.app.submit = submit
+        return setter, clock, submitted
+
+    def test_auto_set_fires_once_when_the_tunnel_appears_after_an_absence(self):
+        tunnels = [[PHONE]]
+        setter, clock, submitted = self.auto_setter(tunnels)
+        self.assertIsNone(setter.tick(), "a tunnel already up at startup is not a new connection")
+        tunnels[0] = []
+        for clock[0] in (10, 70):
+            setter.tick()
+        tunnels[0] = [PHONE]
+        clock[0] = 75
+        self.assertEqual(setter.tick(), "submitted")
+        self.assertEqual(submitted, [({"action": "set", "device": PHONE, "lat": 12.5, "lon": 123.45}, web.AUTO_SET_NOTE)])
+        clock[0] = 80
+        self.assertIsNone(setter.tick())
+        self.assertEqual(len(submitted), 1)
+
+    def test_auto_set_ignores_short_gaps_running_sessions_and_tunneld_outages(self):
+        tunnels = [[]]
+        setter, clock, submitted = self.auto_setter(tunnels)
+        clock[0] = 100
+        setter.tick()
+        tunnels[0] = None  # tunneld down says nothing about the phone
+        clock[0] = 200
+        self.assertIsNone(setter.tick())
+        tunnels[0] = [PHONE]
+        clock[0] = 300
+        self.app.session_running = lambda udid: True
+        self.assertEqual(setter.tick(), "running")
+        tunnels[0] = []
+        clock[0] = 310
+        setter.tick()
+        tunnels[0] = [PHONE]
+        clock[0] = 330  # 20 s gap: a Wi-Fi change, not WireGuard turned on
+        self.app.session_running = lambda udid: False
+        self.assertIsNone(setter.tick())
+        self.assertEqual(submitted, [])
+
+    def test_auto_set_retries_while_busy_and_gives_up_later(self):
+        tunnels = [[]]
+        setter, clock, _submitted = self.auto_setter(tunnels)
+        attempts = []
+
+        def busy(data, note=None):
+            attempts.append(data)
+            raise web.BusyError("busy")
+
+        self.app.submit = busy
+        tunnels[0] = [PHONE]
+        clock[0] = 100
+        self.assertEqual(setter.tick(), "busy")
+        clock[0] = 103
+        self.assertEqual(setter.tick(), "busy")
+        clock[0] = 100 + web.AUTO_SET_PENDING_SECONDS + 1
+        self.assertEqual(setter.tick(), "expired")
+        self.assertEqual(len(attempts), 2)
+
+    def test_auto_set_job_is_marked_in_the_console_state(self):
+        os.environ["SIMLOCATION_WEB_AUTO_SET"] = "1"
+        status, state = self.request()
+        self.assertTrue(state["auto_set"])
+        with patch.object(cli, "auto_set_location", return_value=True):
+            job = self.app.submit({"action": "set", "device": PHONE, "lat": 1, "lon": 2}, note=web.AUTO_SET_NOTE)
+            self.app.worker.join()
+        self.assertTrue(job["auto"])
+        self.assertEqual(self.request()[1]["job"]["messages"][0], web.AUTO_SET_NOTE)
 
     def test_web_command_accepts_common_and_remote_options(self):
         args = cli.parse_args(["--device", "phone", "web", "--remote", "--port", "8765", "--debug"])

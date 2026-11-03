@@ -5,6 +5,7 @@
     "address": "10.77.77.2",
     "pair_record": "~/.pymobiledevice3/remote_00008xxx-xxxxxxxxxxxxxxxx.plist",
     "pair_reference": null,
+    "auto_set_host": "vps-a",
     "public_key": null
   },
   "defaults": {

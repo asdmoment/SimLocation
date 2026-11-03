@@ -567,6 +567,8 @@ def deploy(params):
     if params.get("default_location"):
         lat, lon = params["default_location"]
         lines += [f"SIMLOCATION_DEFAULT_LAT={lat}", f"SIMLOCATION_DEFAULT_LON={lon}"]
+    if params.get("auto_set"):
+        lines.append("SIMLOCATION_WEB_AUTO_SET=1")
     if password_hash:
         lines.append(f"SIMLOCATION_WEB_PASSWORD_HASH={password_hash}")
     web_env_changed = write_file(ETC / "web.env", "\n".join(lines) + "\n", 0o600)

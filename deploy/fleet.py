@@ -222,6 +222,9 @@ def cmd_deploy(inventory, args):
     note(f"代码版本 {revision}")
     record = base64.b64encode(pair_record(inventory)).decode("ascii")
     units = {path.name: path.read_text(encoding="utf-8") for path in sorted(UNITS.glob("*.service"))}
+    auto_host = auto_set_host(inventory)
+    if auto_host:
+        note(f"连上 WireGuard 后自动设到默认位置：由 {auto_host} 负责")
     failures = []
     for name in names:
         host = inventory["hosts"][name]
@@ -231,7 +234,8 @@ def cmd_deploy(inventory, args):
         params.update(address=host["address"], phone=phone["address"], label=host.get("label", name),
                       bundle=bundle, revision=revision, requirements=LOCK.read_text(encoding="utf-8"),
                       units=units, pair_record=record, udid=phone["udid"], alias=phone["alias"],
-                      phone_key=phone.get("public_key"), restart_network=args.restart_network)
+                      phone_key=phone.get("public_key"), restart_network=args.restart_network,
+                      auto_set=name == auto_host)
         try:
             report = remote(inventory, name, "deploy", params)
         except (FleetError, OSError) as exc:
@@ -257,6 +261,21 @@ FULL_TUNNEL = "0.0.0.0/0, ::/0"
 def peer_block(peer, keepalive, allowed=None):
     return (f"[Peer]\n# {peer['name']}\nPublicKey = {peer['public_key']}\nEndpoint = {peer['endpoint']}\n"
             f"AllowedIPs = {allowed or peer['address'] + '/32'}\nPersistentKeepalive = {keepalive}\n")
+
+
+def auto_set_host(inventory):
+    """The one host whose console sets the default point when the phone connects.
+
+    phone.auto_set_host names it; null or "" turns the feature off. Several
+    hosts would each start their own session and fight over the location.
+    """
+    phone = inventory["phone"]
+    if "auto_set_host" not in phone:
+        return sink_host(inventory) if inventory["defaults"].get("default_location") else None
+    chosen = phone["auto_set_host"]
+    if chosen and chosen not in inventory["hosts"]:
+        raise FleetError(f"phone.auto_set_host 指向未知主机 {chosen}")
+    return chosen or None
 
 
 def sink_host(inventory):

@@ -327,6 +327,19 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(set(modes.values()), {0o600})
         self.assertIn("SimLocation-all.png", modes)
 
+    def test_auto_set_goes_to_one_host_only(self):
+        inventory = self.inventory()
+        self.assertIsNone(fleet.auto_set_host(inventory), "no default location: nothing to set")
+        inventory["defaults"]["default_location"] = [1, 2]
+        self.assertEqual(fleet.auto_set_host(inventory), "one")
+        inventory["phone"]["pair_reference"] = "two"
+        self.assertEqual(fleet.auto_set_host(inventory), "two")
+        inventory["phone"]["auto_set_host"] = None
+        self.assertIsNone(fleet.auto_set_host(inventory))
+        inventory["phone"]["auto_set_host"] = "three"
+        with self.assertRaises(fleet.FleetError):
+            fleet.auto_set_host(inventory)
+
     def test_password_csv_matches_the_hash_sent_to_each_host(self):
         inventory = self.inventory()
         sent = {}
