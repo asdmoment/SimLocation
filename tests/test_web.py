@@ -187,41 +187,49 @@ class WebConsoleTests(unittest.TestCase):
         self.app.submit = submit
         return setter, clock, submitted
 
-    def test_auto_set_fires_once_when_the_tunnel_appears_after_an_absence(self):
+    def test_auto_set_fires_once_each_time_the_tunnel_comes_back(self):
         tunnels = [[PHONE]]
         setter, clock, submitted = self.auto_setter(tunnels)
         self.assertIsNone(setter.tick(), "a tunnel already up at startup is not a new connection")
         tunnels[0] = []
-        for clock[0] in (10, 70):
-            setter.tick()
+        clock[0] = 10
+        setter.tick()
         tunnels[0] = [PHONE]
-        clock[0] = 75
+        clock[0] = 15  # WireGuard off and straight back on
         self.assertEqual(setter.tick(), "submitted")
         self.assertEqual(submitted, [({"action": "set", "device": PHONE, "lat": 12.5, "lon": 123.45}, web.AUTO_SET_NOTE)])
-        clock[0] = 80
+        clock[0] = 20
         self.assertIsNone(setter.tick())
         self.assertEqual(len(submitted), 1)
 
-    def test_auto_set_ignores_short_gaps_running_sessions_and_tunneld_outages(self):
+    def test_auto_set_respects_a_manual_clear_across_short_gaps(self):
         tunnels = [[]]
         setter, clock, submitted = self.auto_setter(tunnels)
-        clock[0] = 100
+        setter.tick()
+        self.app.cleared_by_hand.add(PHONE)
+        tunnels[0] = [PHONE]
+        clock[0] = 20  # a Wi-Fi change after the user cleared
+        self.assertEqual(setter.tick(), "suppressed")
+        tunnels[0] = []
+        clock[0] = 30
         setter.tick()
         tunnels[0] = None  # tunneld down says nothing about the phone
-        clock[0] = 200
+        clock[0] = 60
         self.assertIsNone(setter.tick())
         tunnels[0] = [PHONE]
-        clock[0] = 300
+        clock[0] = 100  # gone long enough: WireGuard was really off
         self.app.session_running = lambda udid: True
         self.assertEqual(setter.tick(), "running")
-        tunnels[0] = []
-        clock[0] = 310
-        setter.tick()
-        tunnels[0] = [PHONE]
-        clock[0] = 330  # 20 s gap: a Wi-Fi change, not WireGuard turned on
-        self.app.session_running = lambda udid: False
-        self.assertIsNone(setter.tick())
         self.assertEqual(submitted, [])
+
+    def test_manual_set_lifts_and_manual_clear_sets_the_suppression(self):
+        with patch.object(cli, "clear_location"), patch.object(cli, "auto_set_location", return_value=True):
+            self.app.submit({"action": "clear", "device": PHONE})
+            self.app.worker.join()
+            self.assertTrue(self.app.manually_cleared(PHONE))
+            self.app.submit({"action": "set", "device": PHONE, "lat": 1, "lon": 2})
+            self.app.worker.join()
+            self.assertFalse(self.app.manually_cleared(PHONE))
 
     def test_auto_set_retries_while_busy_and_gives_up_later(self):
         tunnels = [[]]
@@ -233,6 +241,7 @@ class WebConsoleTests(unittest.TestCase):
             raise web.BusyError("busy")
 
         self.app.submit = busy
+        setter.tick()
         tunnels[0] = [PHONE]
         clock[0] = 100
         self.assertEqual(setter.tick(), "busy")

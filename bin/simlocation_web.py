@@ -164,8 +164,9 @@ class MapProxy:
 
 
 AUTO_SET_POLL_SECONDS = 3.0
-# Only a tunnel that was gone this long counts as "WireGuard was just turned
-# on"; the short gap of a Wi-Fi change does not, so a cleared point stays cleared.
+# After a manual clear, a tunnel must have been gone this long before its return
+# sets the default again: a Wi-Fi change drops it for seconds and must not undo
+# the clear. Without a manual clear any return counts.
 AUTO_SET_MIN_ABSENCE_SECONDS = 60.0
 AUTO_SET_PENDING_SECONDS = 120.0
 AUTO_SET_NOTE = "[*] 手机的开发者通道刚建立，自动设到默认位置。"
@@ -361,6 +362,7 @@ class WebConsole:
         self.pmd3_bin = pmd3_bin
         self.args = args
         self.map_proxy = MapProxy(cli)
+        self.cleared_by_hand = set()  # UDIDs (or "*" for clear_all) cleared since their last set
         self.lock = threading.RLock()
         self.favorites_lock = threading.Lock()
         self.tunnel_lock = threading.Lock()
@@ -412,6 +414,10 @@ class WebConsole:
         config = config or self.cli.read_devices()
         requested = self.args.device or os.environ.get("SIMLOCATION_UDID") or config.get("default")
         return self.cli.resolve_alias(requested, config) if requested else None
+
+    def manually_cleared(self, udid):
+        with self.lock:
+            return udid in self.cleared_by_hand or "*" in self.cleared_by_hand
 
     def session_running(self, udid):
         state = self.cli.read_state(self.cli.state_path_for(udid)) or {}
@@ -601,6 +607,11 @@ class WebConsole:
             if self.job and self.job["status"] == "running":
                 raise BusyError("已有操作正在执行，请等待结果。")
             action, udid, log_path, callback = self.prepare(data)
+            if action in ("set", "route"):
+                self.cleared_by_hand.discard(udid)
+                self.cleared_by_hand.discard("*")
+            elif action in ("clear", "clear_all") and not note:
+                self.cleared_by_hand.add(udid if action == "clear" else "*")
             self.sequence += 1
             self.job = {"id": self.sequence, "action": action, "device": udid,
                         "status": "running", "messages": [note] if note else [], "result": None,
@@ -635,19 +646,19 @@ class WebConsole:
 
 
 class AutoSetter:
-    """Sets the default point once when the phone's developer tunnel appears.
+    """Sets the default point once each time the phone's developer tunnel appears.
 
-    The tunnel appears when WireGuard comes up on Wi-Fi. A tunnel counts as new
-    only after it was absent for AUTO_SET_MIN_ABSENCE_SECONDS, and a running
-    session (held, moving or reconnecting) is never replaced. Enable it on one
-    host only: each host holds its own session, and several would fight.
+    The tunnel appears when WireGuard comes up on Wi-Fi. A tunnel already up
+    when the console starts does not count, a running session (held, moving or
+    reconnecting) is never replaced, and after a manual clear a return within
+    AUTO_SET_MIN_ABSENCE_SECONDS is ignored. Enable it on one host only: each
+    host holds its own session, and several would fight.
     """
 
     def __init__(self, app, clock=time.monotonic):
         self.app, self.clock = app, clock
-        # Startup counts as the start of an absence, so a tunnel that is already
-        # up when the console (re)starts is not treated as a fresh connection.
-        self.absent_since = clock()
+        self.present = None  # unknown until tunneld first answers
+        self.absent_since = None
         self.pending_until = None
         self.stopped = threading.Event()
 
@@ -657,15 +668,17 @@ class AutoSetter:
             return None  # tunneld did not answer: nothing learned
         udid = self.app.preferred_udid()
         now = self.clock()
-        if not udid or udid not in tunnels:
-            if self.absent_since is None:
+        present = bool(udid) and udid in tunnels
+        previous, self.present = self.present, present
+        if not present:
+            if previous is not False:
                 self.absent_since = now
             self.pending_until = None
             return None
-        if self.absent_since is not None:
-            if now - self.absent_since >= AUTO_SET_MIN_ABSENCE_SECONDS:
-                self.pending_until = now + AUTO_SET_PENDING_SECONDS
-            self.absent_since = None
+        if previous is False:
+            if self.app.manually_cleared(udid) and now - self.absent_since < AUTO_SET_MIN_ABSENCE_SECONDS:
+                return "suppressed"
+            self.pending_until = now + AUTO_SET_PENDING_SECONDS
         if self.pending_until is None:
             return None
         if now > self.pending_until:
