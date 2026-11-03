@@ -121,8 +121,11 @@ class RemoteHelperTests(unittest.TestCase):
         self.assertIn("elements = { 0, 990, 991 }", text)
         self.assertIn("ip daddr 10.77.77.2 meta skuid != @allowed", text)
         self.assertIn("ip daddr 10.77.77.11 tcp dport 8765 meta skuid != 0", text)
-        self.assertTrue(text.splitlines()[2:4] == ["table inet simlocation", "delete table inet simlocation"],
-                        "reload replaces only our table")
+        lines = [line for line in text.splitlines() if not line.startswith("#")]
+        self.assertEqual(lines[:2], ["table inet simlocation", "delete table inet simlocation"],
+                         "reload replaces only our table")
+        self.assertIn('iifname "wg-simloc" counter drop', text)
+        self.assertIn('oifname "wg-simloc" counter drop', text)
 
     def test_install_code_swaps_trees_only_on_change_and_keeps_one_previous(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -305,6 +308,7 @@ class FleetTests(unittest.TestCase):
             out = Path(directory)
             combined = (out / "SimLocation-all.conf").read_text()
             single = (out / "SimLocation-two.conf").read_text()
+            strict = (out / "SimLocation-strict.conf").read_text()
             modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in out.iterdir()}
         save.assert_called_once()
         self.assertTrue(inventory["phone"]["public_key"])
@@ -313,6 +317,11 @@ class FleetTests(unittest.TestCase):
         self.assertIn("AllowedIPs = 10.77.77.1/32", combined)
         self.assertIn("Endpoint = 203.0.113.9:51820", single)
         self.assertNotIn("0.0.0.0/0", combined)
+        self.assertEqual(strict.count("[Peer]"), 2)
+        self.assertEqual(strict.count("AllowedIPs = 0.0.0.0/0, ::/0"), 1)
+        self.assertIn("# one\nPublicKey", strict.split("0.0.0.0/0")[0].rsplit("[Peer]", 1)[1])
+        self.assertIn("AllowedIPs = 10.77.77.11/32", strict)
+        self.assertEqual(strict.split("[Peer]")[0], combined.split("[Peer]")[0])
         self.assertNotIn("DNS", combined)
         self.assertEqual(set(modes.values()), {0o600})
         self.assertIn("SimLocation-all.png", modes)

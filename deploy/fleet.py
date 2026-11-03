@@ -247,9 +247,21 @@ def cmd_deploy(inventory, args):
         sys.exit(1)
 
 
-def peer_block(peer, keepalive):
+# The strict profile sends every route into the tunnel. One peer must own the
+# default routes (WireGuard allows each prefix on one peer only); the others keep
+# their /32, which is more specific. That host drops forwarded traffic, so other
+# apps get no network instead of leaving outside the tunnel while Surge is off.
+FULL_TUNNEL = "0.0.0.0/0, ::/0"
+
+
+def peer_block(peer, keepalive, allowed=None):
     return (f"[Peer]\n# {peer['name']}\nPublicKey = {peer['public_key']}\nEndpoint = {peer['endpoint']}\n"
-            f"AllowedIPs = {peer['address']}/32\nPersistentKeepalive = {keepalive}\n")
+            f"AllowedIPs = {allowed or peer['address'] + '/32'}\nPersistentKeepalive = {keepalive}\n")
+
+
+def sink_host(inventory):
+    reference = inventory["phone"].get("pair_reference")
+    return reference if reference in inventory["hosts"] else next(iter(inventory["hosts"]))
 
 
 def cmd_phone(inventory, args):
@@ -275,15 +287,21 @@ def cmd_phone(inventory, args):
 
     out = private_dir(args.out)
     interface = f"[Interface]\nPrivateKey = {private}\nAddress = {phone['address']}/32\nMTU = {defaults['mtu']}\n"
-    configs = {"SimLocation-all": peers, **{f"SimLocation-{peer['name']}": [peer] for peer in peers}}
-    for title, chosen in configs.items():
-        text = interface + "".join("\n" + peer_block(peer, defaults["persistent_keepalive"]) for peer in chosen)
+    sink = sink_host(inventory)
+    configs = {"SimLocation-all": (peers, None), "SimLocation-strict": (peers, sink),
+               **{f"SimLocation-{peer['name']}": ([peer], None) for peer in peers}}
+    for title, (chosen, full) in configs.items():
+        text = interface + "".join(
+            "\n" + peer_block(peer, defaults["persistent_keepalive"], FULL_TUNNEL if peer["name"] == full else None)
+            for peer in chosen)
         write_private(out / f"{title}.conf", text)
         image = io.BytesIO()
         qrcode.make(text, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=4).save(image, "PNG")
         write_private(out / f"{title}.png", image.getvalue())
     write_private(out / "README.txt",
-                  "SimLocation-all：一个隧道连全部 VPS，推荐只导入这一个。\n"
+                  "SimLocation-all：一个隧道连全部 VPS，推荐导入。只有 SimLocation 的流量进隧道，其他 App 照常上网（Surge 停用期间不受保护）。\n"
+                  f"SimLocation-strict：同一把密钥，所有流量进隧道，由 {sink} 丢弃；开着时只有 SimLocation 能用，其他 App 断网。"
+                  "和 SimLocation-all 只开一个。地图瓦片也会加载不出来，用经纬度、收藏或默认点。\n"
                   "SimLocation-<主机>：只连一台，备用；iOS 同一时间只能开一个 VPN。\n"
                   "这些文件含手机私钥。扫码导入后请删除整个文件夹。\n")
     print(f"手机配置和二维码在 {out}")

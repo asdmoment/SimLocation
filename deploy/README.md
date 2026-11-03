@@ -88,7 +88,8 @@ VPS 自带的 python3 低于 3.13 或没有 TLS-PSK 时（例如 Ubuntu 24.04 �
 3. `python3 deploy/fleet.py phone`
 
    在本机生成新的手机密钥，服务器上只保存公钥。输出到一个权限 0700 的私有目录：
-   - `SimLocation-all.conf` / `.png`：一个隧道连全部 VPS，推荐只导入这一个
+   - `SimLocation-all.conf` / `.png`：一个隧道连全部 VPS，推荐导入。只有发往各主机的流量进隧道，其他 App 照常走 Wi-Fi 或蜂窝；Surge 停用期间，这些流量不受 Surge 保护
+   - `SimLocation-strict.conf` / `.png`：与上面用同一把密钥，所有流量都进隧道。默认路由交给 `pair_reference` 指定的那台主机，它不转发任何来自手机的包，所以开着它时，除了 SimLocation，其他 App 都断网，不会绕过隧道直连。代价是地图瓦片也加载不出来（可以用经纬度、收藏或默认点）。和 `SimLocation-all` 同一时间只开一个
    - 每台主机各自的配置，作为备用
 
    用 WireGuard App 扫码导入，导入后删除整个目录。
@@ -140,6 +141,7 @@ systemctl stop simloc-holdprobe            # 结束，不发清除或坐标
 - **网络**
   - tunneld 只监听 `127.0.0.1`，控制台只监听本机的 WireGuard 地址。
   - ufw 只允许手机访问控制台端口；nftables 只允许 root 和两个服务账户访问手机、RSD 接口和 tunneld。
+  - nftables 的 forward 链丢弃一切进出 `wg-simloc` 的转发包，即使主机为别的服务开了 `ip_forward` 也一样。所以手机的流量不会经 VPS 转发出去，严格模式就是靠这一条实现「断网而不泄漏」的。
 - **控制台鉴权**：密码登录；会话 cookie 设为 `HttpOnly; SameSite=Strict`；`/api/*` 还要求带 CSRF 头；Host 名单防 DNS 重绑定；按来源和全局两级限制失败次数。
 - **部署工具本身**：在服务账户目录里写文件时，以该账户身份执行；root 读取账户目录时，每一级都不跟随符号链接；从参考主机取回的配对记录，必须解析出与本机一致的密钥，才会分发到其他主机。
 - 隧道日志和 `hold_probe.py` 只记录 WireGuard 端点的前两段和 NAT 端口，不记录密钥。
