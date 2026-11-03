@@ -285,7 +285,8 @@ class FleetTests(unittest.TestCase):
         bundle, revision = fleet.build_bundle()
         with tarfile.open(fileobj=io.BytesIO(base64.b64decode(bundle))) as archive:
             names = set(archive.getnames())
-        self.assertTrue({"bin/simlocation.py", "web/console.html", "web/login.html", "deploy/network_tunneld.py"} <= names)
+        self.assertTrue({"bin/simlocation.py", "web/console.html", "web/login.html", "deploy/network_tunneld.py",
+                         "web/vendor/leaflet-1.9.4/leaflet.js", "web/vendor/leaflet-1.9.4/images/marker-icon.png"} <= names)
         self.assertFalse(any(name.startswith(("var/", "tests/", "deploy/fleet")) for name in names))
         self.assertTrue(revision)
 

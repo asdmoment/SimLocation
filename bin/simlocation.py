@@ -1701,9 +1701,19 @@ def default_map_view():
     return MAP_FALLBACK_VIEW
 
 
+# Third-party URLs in map-osm.html and the same-origin paths the web console
+# serves for them, so the picker still works when the phone can reach nothing
+# but the console (the strict WireGuard profile).
+OSM_LOCAL_ASSETS = (
+    ("https://unpkg.com/leaflet@1.9.4/dist/", "/map/leaflet-1.9.4/"),
+    ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", "/map/tile/{z}/{x}/{y}.png"),
+    ("https://nominatim.openstreetmap.org/search?", "/map/search?"),
+)
+
+
 def render_map_html(
     amap_key=None, *, route_mode=False, speed_kmh=DEFAULT_ROUTE_SPEED_KMH,
-    loop_route=False, pick_only=False,
+    loop_route=False, pick_only=False, local_assets=False,
 ):
     html_path = MAP_AMAP_HTML_PATH if amap_key else MAP_OSM_HTML_PATH
     center, zoom = default_map_view()
@@ -1726,6 +1736,11 @@ def render_map_html(
         html_text = html_text.replace(placeholder, value)
     if amap_key:
         html_text = html_text.replace("{{AMAP_KEY}}", quote(amap_key, safe=""))
+    elif local_assets:
+        for remote_url, local_path in OSM_LOCAL_ASSETS:
+            if remote_url not in html_text:
+                raise RuntimeError(f"map-osm.html no longer references {remote_url}")
+            html_text = html_text.replace(remote_url, local_path)
     return html_text.encode("utf-8")
 
 

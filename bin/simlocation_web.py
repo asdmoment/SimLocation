@@ -52,12 +52,114 @@ TUNNEL_STATUS_TTL_SECONDS = 3
 JSON_TYPE = "application/json; charset=utf-8"
 HTML_TYPE = "text/html; charset=utf-8"
 # The console and login pages load nothing from other origins. The map picker
-# is a separate document in an iframe and keeps its own CDN and tile hosts.
+# is a separate document in an iframe; with the OSM provider its Leaflet files,
+# tiles and search are served by MapProxy below, so it needs no other origin
+# either. Amap's SDK cannot be proxied that way and still loads from Amap.
 PAGE_CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
     "connect-src 'self'; frame-src 'self'; frame-ancestors 'self'; form-action 'self'; "
     "base-uri 'none'; object-src 'none'"
 )
+
+
+LEAFLET_DIR = "vendor/leaflet-1.9.4"
+LEAFLET_FILES = {
+    "leaflet.js": "text/javascript; charset=utf-8",
+    "leaflet.css": "text/css; charset=utf-8",
+    **{f"images/{name}": "image/png" for name in (
+        "layers.png", "layers-2x.png", "marker-icon.png", "marker-icon-2x.png", "marker-shadow.png")},
+}
+TILE_PATH = re.compile(r"/map/tile/(\d{1,2})/(\d{1,7})/(\d{1,7})\.png")
+TILE_UPSTREAM = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+TILE_MAX_ZOOM = 19
+TILE_MAX_BYTES = 512 * 1024
+TILE_CACHE_BYTES = 48 * 1024 * 1024
+TILE_CACHE_SECONDS = 7 * 24 * 3600
+SEARCH_UPSTREAM = "https://nominatim.openstreetmap.org/search"
+SEARCH_QUERY_MAX = 200
+SEARCH_MAX_BYTES = 1024 * 1024
+# Nominatim's usage policy: at most one request per second.
+SEARCH_INTERVAL_SECONDS = 1.0
+MAP_UPSTREAM_TIMEOUT = (5, 10)
+MAP_UPSTREAM_PARALLEL = 4
+
+
+class MapUnavailable(Exception):
+    pass
+
+
+class MapProxy:
+    """Fetches OSM tiles and Nominatim results on the phone's behalf.
+
+    Upstream URLs are fixed and every parameter is validated, so this is never
+    an open proxy; it is only reachable with a console session. Requests carry
+    an identifying User-Agent as the OSM tile and Nominatim policies require.
+    """
+
+    def __init__(self, cli, clock=time.monotonic, sleep=time.sleep):
+        self.cli = cli
+        self.clock, self.sleep = clock, sleep
+        self.user_agent = f"SimLocation/{cli.read_project_version()} (+https://github.com/asdmoment/SimLocation)"
+        self.tiles = {}  # insertion order doubles as LRU order
+        self.tile_bytes = 0
+        self.tile_lock = threading.Lock()
+        self.upstream = threading.BoundedSemaphore(MAP_UPSTREAM_PARALLEL)
+        self.search_lock = threading.Lock()
+        self.last_search = None
+
+    def tile(self, z, x, y):
+        if not 0 <= z <= TILE_MAX_ZOOM or not (0 <= x < 2 ** z and 0 <= y < 2 ** z):
+            raise ValueError("瓦片坐标无效。")
+        key = (z, x, y)
+        with self.tile_lock:
+            data = self.tiles.pop(key, None)
+            if data is not None:
+                self.tiles[key] = data
+                return data
+        with self.upstream:
+            try:
+                response = self.cli.requests.get(TILE_UPSTREAM.format(z=z, x=x, y=y),
+                                                 headers={"User-Agent": self.user_agent},
+                                                 timeout=MAP_UPSTREAM_TIMEOUT)
+            except Exception as exc:
+                raise MapUnavailable(type(exc).__name__) from exc
+        if response.status_code != 200 or not response.headers.get("Content-Type", "").startswith("image/png"):
+            raise MapUnavailable(f"HTTP {response.status_code}")
+        data = response.content
+        if len(data) > TILE_MAX_BYTES:
+            raise MapUnavailable("tile too large")
+        with self.tile_lock:
+            if key not in self.tiles:
+                self.tiles[key] = data
+                self.tile_bytes += len(data)
+            while self.tile_bytes > TILE_CACHE_BYTES:
+                self.tile_bytes -= len(self.tiles.pop(next(iter(self.tiles))))
+        return data
+
+    def search(self, query, language):
+        if not re.fullmatch(r"[A-Za-z0-9,;=.\- ]{1,64}", language or ""):
+            language = "zh-CN,zh,en"
+        query = query.strip()
+        if not query or len(query) > SEARCH_QUERY_MAX:
+            raise ValueError("搜索词需为 1–200 个字符。")
+        params = {"format": "json", "limit": "8", "dedupe": "0", "addressdetails": "1", "q": query}
+        with self.search_lock:
+            if self.last_search is not None:
+                wait = self.last_search + SEARCH_INTERVAL_SECONDS - self.clock()
+                if wait > 0:
+                    self.sleep(wait)
+            self.last_search = self.clock()
+            try:
+                response = self.cli.requests.get(SEARCH_UPSTREAM, params=params, timeout=MAP_UPSTREAM_TIMEOUT,
+                                                 headers={"User-Agent": self.user_agent, "Accept-Language": language})
+            except Exception as exc:
+                raise MapUnavailable(type(exc).__name__) from exc
+        if response.status_code != 200 or len(response.content) > SEARCH_MAX_BYTES:
+            raise MapUnavailable(f"HTTP {response.status_code}")
+        results = json.loads(response.content)
+        if not isinstance(results, list):
+            raise MapUnavailable("unexpected search response")
+        return json.dumps(results, ensure_ascii=False).encode("utf-8")
 
 
 class BusyError(ValueError):
@@ -245,6 +347,7 @@ class WebConsole:
         self.cli = cli
         self.pmd3_bin = pmd3_bin
         self.args = args
+        self.map_proxy = MapProxy(cli)
         self.lock = threading.RLock()
         self.favorites_lock = threading.Lock()
         self.tunnel_lock = threading.Lock()
@@ -534,13 +637,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         # The console polls every two seconds; an access log would only be noise.
         pass
 
-    def respond(self, status, data, content_type=JSON_TYPE, headers=(), referrer="no-referrer"):
+    def respond(self, status, data, content_type=JSON_TYPE, headers=(), referrer="no-referrer", cache="no-store"):
         if not isinstance(data, bytes):
             data = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.send_header("Referrer-Policy", referrer)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
@@ -707,9 +810,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         elif path == "/picker":
             page = app.cli.render_map_html(
                 os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() or None,
-                route_mode=(query.get("mode") == ["route"]), pick_only=True,
+                route_mode=(query.get("mode") == ["route"]), pick_only=True, local_assets=True,
             )
             self.respond(200, page, HTML_TYPE)
+        elif path.startswith("/map/"):
+            self.map_asset(path, query)
         elif path == "/":
             page = self.asset("console.html").replace(b"{{CSRF_TOKEN}}", session["csrf"].encode("ascii"))
             self.respond(200, page, HTML_TYPE, [("Content-Security-Policy", PAGE_CSP)])
@@ -717,6 +822,26 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.respond(200, self.asset("console.js"), "text/javascript; charset=utf-8")
         else:
             self.respond(404, {"error": "接口不存在。"})
+
+    def map_asset(self, path, query):
+        proxy = self.server.app.map_proxy
+        leaflet = path.removeprefix("/map/leaflet-1.9.4/")
+        try:
+            if leaflet in LEAFLET_FILES:
+                self.respond(200, self.asset(f"{LEAFLET_DIR}/{leaflet}"), LEAFLET_FILES[leaflet],
+                             cache="private, max-age=86400")
+            elif match := TILE_PATH.fullmatch(path):
+                data = proxy.tile(*(int(part) for part in match.groups()))
+                self.respond(200, data, "image/png", cache=f"private, max-age={TILE_CACHE_SECONDS}")
+            elif path == "/map/search":
+                body = proxy.search((query.get("q") or [""])[0], self.headers.get("Accept-Language", ""))
+                self.respond(200, body)
+            else:
+                self.respond(404, {"error": "接口不存在。"})
+        except ValueError as exc:
+            self.respond(400, {"error": str(exc)})
+        except MapUnavailable:
+            self.respond(502, {"error": "地图服务暂时无法访问。"})
 
     def do_POST(self):
         path, _query = self.parsed_path()

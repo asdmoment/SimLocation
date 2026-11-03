@@ -129,8 +129,8 @@ def endpoint(host):
 
 
 def build_bundle():
-    names = BUNDLE + sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "web").iterdir()
-                            if path.is_file() and not path.name.startswith("."))
+    names = BUNDLE + sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "web").rglob("*")
+                            if path.is_file() and not any(part.startswith(".") for part in path.relative_to(ROOT).parts))
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for name in names:
@@ -301,7 +301,7 @@ def cmd_phone(inventory, args):
     write_private(out / "README.txt",
                   "SimLocation-all：一个隧道连全部 VPS，推荐导入。只有 SimLocation 的流量进隧道，其他 App 照常上网（Surge 停用期间不受保护）。\n"
                   f"SimLocation-strict：同一把密钥，所有流量进隧道，由 {sink} 丢弃；开着时只有 SimLocation 能用，其他 App 断网。"
-                  "和 SimLocation-all 只开一个。地图瓦片也会加载不出来，用经纬度、收藏或默认点。\n"
+                  "和 SimLocation-all 只开一个。控制台的地图由 VPS 代取，照常可用。\n"
                   "SimLocation-<主机>：只连一台，备用；iOS 同一时间只能开一个 VPN。\n"
                   "这些文件含手机私钥。扫码导入后请删除整个文件夹。\n")
     print(f"手机配置和二维码在 {out}")

@@ -89,7 +89,7 @@ VPS 自带的 python3 低于 3.13 或没有 TLS-PSK 时（例如 Ubuntu 24.04 �
 
    在本机生成新的手机密钥，服务器上只保存公钥。输出到一个权限 0700 的私有目录：
    - `SimLocation-all.conf` / `.png`：一个隧道连全部 VPS，推荐导入。只有发往各主机的流量进隧道，其他 App 照常走 Wi-Fi 或蜂窝；Surge 停用期间，这些流量不受 Surge 保护
-   - `SimLocation-strict.conf` / `.png`：与上面用同一把密钥，所有流量都进隧道。默认路由交给 `pair_reference` 指定的那台主机，它不转发任何来自手机的包，所以开着它时，除了 SimLocation，其他 App 都断网，不会绕过隧道直连。代价是地图瓦片也加载不出来（可以用经纬度、收藏或默认点）。和 `SimLocation-all` 同一时间只开一个
+   - `SimLocation-strict.conf` / `.png`：与上面用同一把密钥，所有流量都进隧道。默认路由交给 `pair_reference` 指定的那台主机，它不转发任何来自手机的包，所以开着它时，除了 SimLocation，其他 App 都断网，不会绕过隧道直连。控制台的地图（Leaflet、瓦片和地址搜索）由 VPS 代为获取，经隧道送到手机，所以严格模式下照常能用。和 `SimLocation-all` 同一时间只开一个
    - 每台主机各自的配置，作为备用
 
    用 WireGuard App 扫码导入，导入后删除整个目录。

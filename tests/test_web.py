@@ -1,6 +1,8 @@
 """Web API contracts. Device and tunnel operations are always mocked."""
 
 import argparse
+import base64
+import hashlib
 import functools
 import http.client
 import importlib.util
@@ -90,6 +92,85 @@ class WebConsoleTests(unittest.TestCase):
 
     def operation(self, action, **data):
         return self.request("/api/action", {"action": action, **data})
+
+    def upstream(self, status=200, content=b"\x89PNG tile", content_type="image/png"):
+        return MagicMock(status_code=status, content=content, headers={"Content-Type": content_type})
+
+    def test_picker_loads_nothing_from_other_origins(self):
+        status, page = self.request("/picker?embed=1")
+        self.assertEqual(status, 200)
+        for host in ("unpkg.com", "tile.openstreetmap.org", "nominatim.openstreetmap.org/search"):
+            self.assertNotIn(host, page)
+        self.assertIn('src="/map/leaflet-1.9.4/leaflet.js"', page)
+        self.assertIn('"/map/tile/{z}/{x}/{y}.png"', page)
+        # The vendored files are byte-identical to what the SRI hashes pin.
+        for name, content_type in (("leaflet.js", "text/javascript"), ("leaflet.css", "text/css")):
+            response, body = self.raw("GET", f"/map/leaflet-1.9.4/{name}", None, {"Cookie": self.cookie})
+            digest = base64.b64encode(hashlib.sha384(body).digest()).decode()
+            self.assertIn(f'integrity="sha384-{digest}"', page, name)
+            self.assertTrue(response.getheader("Content-Type").startswith(content_type))
+        self.assertEqual(self.raw("GET", "/map/leaflet-1.9.4/images/marker-icon.png", None,
+                                  {"Cookie": self.cookie})[0].status, 200)
+
+    def test_map_routes_need_a_session_and_refuse_other_files(self):
+        for path in ("/map/leaflet-1.9.4/leaflet.js", "/map/tile/1/0/0.png", "/map/search?q=x"):
+            self.assertEqual(self.request(path, auth=False)[0], 401, path)
+        for path in ("/map/leaflet-1.9.4/../console.html", "/map/leaflet-1.9.4/LICENSE",
+                     "/map/tile/1/0/0.jpg", "/map/tile/1/0/0.png/x", "/map/other"):
+            self.assertEqual(self.request(path)[0], 404, path)
+        self.tunneld.assert_not_called()
+
+    def test_tiles_are_validated_fetched_once_and_cached(self):
+        self.tunneld.side_effect = None
+        self.tunneld.return_value = self.upstream()
+        for path in ("/map/tile/20/0/0.png", "/map/tile/2/4/0.png", "/map/tile/2/0/4.png"):
+            self.assertEqual(self.request(path)[0], 400, path)
+        self.tunneld.assert_not_called()
+        response, body = self.raw("GET", "/map/tile/2/3/1.png", None, {"Cookie": self.cookie})
+        self.assertEqual((response.status, body), (200, b"\x89PNG tile"))
+        self.assertIn("max-age", response.getheader("Cache-Control"))
+        self.assertEqual(self.raw("GET", "/map/tile/2/3/1.png", None, {"Cookie": self.cookie})[1], b"\x89PNG tile")
+        self.tunneld.assert_called_once()
+        url = self.tunneld.call_args.args[0]
+        self.assertEqual(url, "https://tile.openstreetmap.org/2/3/1.png")
+        self.assertTrue(self.tunneld.call_args.kwargs["headers"]["User-Agent"].startswith("SimLocation/"))
+
+    def test_tile_cache_evicts_oldest_beyond_its_budget(self):
+        self.tunneld.side_effect = None
+        self.tunneld.return_value = self.upstream(content=b"x" * 400)
+        with patch.object(web, "TILE_CACHE_BYTES", 1000):
+            for x in range(3):
+                self.app.map_proxy.tile(2, x, 0)
+        self.assertEqual(list(self.app.map_proxy.tiles), [(2, 1, 0), (2, 2, 0)])
+        self.assertEqual(self.app.map_proxy.tile_bytes, 800)
+
+    def test_upstream_failures_become_502_and_are_not_cached(self):
+        self.assertEqual(self.request("/map/tile/1/0/0.png")[0], 502)
+        self.tunneld.side_effect = None
+        self.tunneld.return_value = self.upstream(content=b"<html>", content_type="text/html")
+        self.assertEqual(self.request("/map/tile/1/0/0.png")[0], 502)
+        self.assertEqual(self.app.map_proxy.tiles, {})
+
+    def test_search_is_forwarded_with_fixed_parameters_and_paced(self):
+        self.tunneld.side_effect = None
+        self.tunneld.return_value = self.upstream(content=json.dumps([{"display_name": "天安门"}]).encode(),
+                                                  content_type="application/json")
+        waits = []
+        self.app.map_proxy.sleep = waits.append
+        self.app.map_proxy.clock = lambda: 50.0
+        status, body = self.request("/map/search?q=%E5%A4%A9%E5%AE%89%E9%97%A8&format=xml&limit=999",
+                                    headers={"Accept-Language": "zh-CN,zh,en"})
+        self.assertEqual((status, body), (200, [{"display_name": "天安门"}]))
+        kwargs = self.tunneld.call_args.kwargs
+        self.assertEqual(self.tunneld.call_args.args[0], "https://nominatim.openstreetmap.org/search")
+        self.assertEqual(kwargs["params"], {"format": "json", "limit": "8", "dedupe": "0", "addressdetails": "1",
+                                            "q": "天安门"})
+        self.assertEqual(kwargs["headers"]["Accept-Language"], "zh-CN,zh,en")
+        self.request("/map/search?q=again", headers={"Accept-Language": "<script>"})
+        self.assertEqual(waits, [1.0])
+        self.assertEqual(self.tunneld.call_args.kwargs["headers"]["Accept-Language"], "zh-CN,zh,en")
+        self.assertEqual(self.request("/map/search?q=" + "a" * 201)[0], 400)
+        self.assertEqual(self.request("/map/search")[0], 400)
 
     def test_web_command_accepts_common_and_remote_options(self):
         args = cli.parse_args(["--device", "phone", "web", "--remote", "--port", "8765", "--debug"])
