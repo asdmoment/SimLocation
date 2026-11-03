@@ -67,6 +67,52 @@ class WireGuardConfigTests(unittest.TestCase):
             remote.wireguard_config("10.77.77.1", 51820, "10.77.77.2", "not a key", 1280)
 
 
+class PeerRouteTests(unittest.TestCase):
+    """wg syncconf adds peers without routes; the deploy must add them."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.patch = patch.object(remote, "WG_CONF", Path(self.directory.name) / "wg-simloc.conf")
+        self.patch.start()
+        self.text = (f"[Interface]\nAddress = 10.77.77.21/32\nListenPort = 51820\nPrivateKey = {SERVER_KEY}\n"
+                     f"MTU = 1280\n\n[Peer]\nPublicKey = {PHONE_KEY}\nAllowedIPs = 10.77.77.2/32\n")
+
+    def tearDown(self):
+        self.patch.stop()
+        self.directory.cleanup()
+
+    def apply(self, interface_changed=False, active="active"):
+        calls = []
+
+        def fake_run(*args, **kwargs):
+            calls.append(args)
+            return SimpleNamespace(stdout="stripped\n", returncode=0)
+
+        with patch.object(remote, "run", side_effect=fake_run), \
+             patch.object(remote, "unit_state", return_value=(active, "enabled")), \
+             patch.object(remote.os, "fchown"):
+            action = remote.apply_wireguard(self.text, interface_changed)
+        return action, calls
+
+    def test_adding_the_phone_key_to_a_running_interface_routes_the_phone(self):
+        action, calls = self.apply()
+        self.assertEqual(action, "peers synced")
+        route = ("ip", "-4", "route", "replace", "10.77.77.2/32", "dev", "wg-simloc")
+        self.assertIn(route, calls)
+        self.assertGreater(calls.index(route), calls.index(("wg", "syncconf", "wg-simloc", "/dev/stdin")))
+
+    def test_an_unchanged_config_still_repairs_a_missing_route(self):
+        self.apply()
+        action, calls = self.apply()
+        self.assertIsNone(action)
+        self.assertEqual(calls, [("ip", "-4", "route", "replace", "10.77.77.2/32", "dev", "wg-simloc")])
+
+    def test_wg_quick_adds_routes_itself_when_it_starts_or_restarts(self):
+        for kwargs in ({"active": "inactive"}, {"interface_changed": True}):
+            _, calls = self.apply(**kwargs)
+            self.assertFalse([c for c in calls if c[:1] == ("ip",)], kwargs)
+
+
 class RemoteHelperTests(unittest.TestCase):
     def test_nft_rules_name_the_service_accounts_and_addresses(self):
         with patch.object(remote, "run"), patch.object(remote, "write_file", return_value=True) as write:

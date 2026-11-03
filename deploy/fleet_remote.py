@@ -468,11 +468,29 @@ def apply_wireguard(text, interface_changed):
     if interface_changed:
         run("systemctl", "restart", unit)
         return "restarted"
+    action = None
     if changed:
         stripped = run("wg-quick", "strip", WG_INTERFACE).stdout
         run("wg", "syncconf", WG_INTERFACE, "/dev/stdin", input=stripped)
-        return "peers synced"
-    return None
+        action = "peers synced"
+    ensure_peer_routes(text)
+    return action
+
+
+def ensure_peer_routes(text):
+    """Route every peer's AllowedIPs into the interface.
+
+    wg-quick adds these routes only when it brings the interface up, and
+    `wg syncconf` never does. A host first deployed without the phone's key
+    therefore had no route to the phone once the key arrived: replies to the
+    console and the adapter's connections left through the default gateway.
+    A /30 address hid this on the first host, since its connected route
+    covers the phone.
+    """
+    for line in re.findall(r"^AllowedIPs\s*=\s*(.+)$", text, re.M):
+        for network in filter(None, (part.strip() for part in line.split(","))):
+            ipaddress.ip_network(network, strict=False)
+            run("ip", "-6" if ":" in network else "-4", "route", "replace", network, "dev", WG_INTERFACE)
 
 
 def server_public_key():
