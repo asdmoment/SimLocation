@@ -36,7 +36,7 @@ IP-CIDR,10.77.77.31/32,SimLocation-WG,no-resolve
 ```
 
 示例手机 18 Pro：这四条写在 `[Rule]` 的 `# >>> generated from rules/ …` 标记线以上；
-暂存副本是 `~/path/to/surge-profile.conf`，私钥在那里是占位符。
+暂存副本是 `~/path/to/surge-profile.conf`，2026-11-05 起私钥在那里也是真实值（文件 0600、不进 git），轮换后手机和暂存副本一起换。
 
 几点约束：
 
@@ -60,7 +60,7 @@ IP-CIDR,10.77.77.31/32,SimLocation-WG,no-resolve
 
 | 变化 | 要改的 |
 |---|---|
-| `fleet.py phone` 轮换了手机密钥 | `private-key` 换成新私钥；官方 App 也要重新导入 |
+| `fleet.py phone` 轮换了手机密钥 | 手机和暂存副本的 `private-key` 都换成新私钥；官方 App 也要重新导入 |
 | 新增或去掉一台主机 | 增删一个 `peer` 和一条规则；端点 IP 同步进 `tun-excluded-routes` |
 | 主机换 IP | 改 `endpoint` 和 `tun-excluded-routes` |
 | 主机重装、WireGuard 服务器密钥变了 | 改对应 peer 的 `public-key`（`fleet.py deploy` 后 `fleet.json` 里是新值） |
