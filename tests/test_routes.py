@@ -485,6 +485,15 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
             await task
         simulation.set.assert_not_awaited()
 
+    async def test_a_resend_error_without_a_message_is_named(self):
+        # asyncio.wait_for times out with a bare TimeoutError; the reason must still say so.
+        with mock.patch.object(cli, "snapshot_rsd_candidates", return_value=[("fd00::1", "1001")]):
+            simulation = mock.AsyncMock()
+            simulation.set.side_effect = TimeoutError()
+            with self.assertRaisesRegex(cli.SessionLost, "重发定位失败: TimeoutError$"):
+                await cli.watch_session(simulation, ("fd00::1", 1001), "UDID", {"lat": "1", "lon": "2"},
+                                        asyncio.Event(), lambda: True, interval=0.01)
+
     async def test_gives_up_after_the_window_and_reports_why(self):
         self.simulations(mock.AsyncMock())
         with mock.patch.object(cli, "snapshot_rsd_candidates", return_value=[]), \

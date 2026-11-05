@@ -1251,7 +1251,7 @@ async def watch_session(simulation, rsd_pair, udid, state, stop_event, resend, i
                     simulation.set(float(state["lat"]), float(state["lon"])), HOLD_WATCH_SET_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
-                raise SessionLost(f"重发定位失败: {exc or type(exc).__name__}") from exc
+                raise SessionLost(f"重发定位失败: {str(exc) or type(exc).__name__}") from exc
 
 
 async def _hold_one_connection(
