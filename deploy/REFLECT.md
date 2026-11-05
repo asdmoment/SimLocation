@@ -62,15 +62,26 @@ The output ZIP includes a private client key. Transfer it only to your phone,
 unzip it, run `pickFolder` in a-Shell, and select the extracted folder. Do not
 install its CA as an iOS certificate or as a Surge MITM CA.
 
-Keep Surge running with the existing module enabled:
+Keep Surge running with the SimLocation Reflect module enabled. Its source is
+`scripts/SimLocation-Reflect.sgmodule` in the Surge repo (`~/path/to/surge-repo`), `tools/push-scripts.sh`
+publishes it on the tailnet, and the phone installs it from
+`http://100.64.0.11:9101/script/SimLocation-Reflect.sgmodule`. It replaces the hand-made
+"RemotePairing Reflect Test" module (2026-11-05), with one rule added that pins the
+address to DIRECT:
 
 ```ini
 [General]
 tun-included-routes = %INSERT% 10.7.0.1/32
 
+[Rule]
+IP-CIDR,10.7.0.1/32,DIRECT,no-resolve
+
 [IP Rewrite]
 10.7.0.1 = reflect
 ```
+
+A module lives outside the profile, so a whole-profile install does not bring it back;
+after reinstalling Surge, install it again from that address.
 
 Connect Wi-Fi, then run:
 

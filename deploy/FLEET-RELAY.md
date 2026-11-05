@@ -29,7 +29,7 @@ python3 fleet.py relay-status
 
 1. 把 `Reflect-Relay-Fleet.zip` 传到手机，解压，在 a-Shell 里 `pickFolder` 选解压出来的
    `Reflect-Relay-Fleet` 文件夹。旧的单台包（Reflect-Relay-Phone*）可以删掉。
-2. Surge 保持开启，reflect 模块（`10.7.0.1 = reflect`）保持启用，连 Wi-Fi。
+2. Surge 保持开启，Surge 模块 SimLocation Reflect（`10.7.0.1 = reflect`，安装地址见 `REFLECT.md`）保持启用，连 Wi-Fi。
 3. 运行：
 
    ```
@@ -79,7 +79,7 @@ python3 fleet.py relay-stop --force             # 强制断开，不会清除手
 |---|---|
 | 手机全部 `RECONNECTING` | `relay-status` 看 `relay.session`；是 `disabled` 就 `relay-start` |
 | 某一台 `NODE_STOPPED` | 证书过期或包不匹配：重新 `relay-prepare` + `relay-deploy`，换手机包 |
-| `phone_port_refused` | 手机不在 Wi-Fi，或 reflect 模块没开 |
+| `phone_port_refused` | 手机不在 Wi-Fi，或 SimLocation Reflect 模块没开 |
 | 主机重装 / 新增主机 | 先 `fleet.py deploy`，再整套 `relay-prepare`（包按 `fleet.json` 的主机集合生成） |
 | 某台公网 8446 不通（云厂商挡入站 TCP，vps-b 就是） | 手机包 `phone.json` 里把那台的 `server` 改成它的 WireGuard 地址（如 `10.77.77.1`），经 Surge 的 `SimLocation-WG` 连；服务器需要 `fleet_remote.py` 里的两条规则（wg-simloc 入站 8446、回包放行），`fleet.py deploy` 会带上。每次 `relay-prepare` 后都要重新改 |
 | 某台 `RELAY_READY` 后立刻断开、反复重连，服务器日志什么都没有 | 多半是服务器 Python ≥ 3.13 严格校验客户端证书。2026-11-05 之前生成的包缺 AKI/SKI，vps-b（3.14）因此拒绝；重新 `relay-prepare` 即可 |
