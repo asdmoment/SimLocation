@@ -370,6 +370,22 @@ simlocation doctor
   loopback 类型的新连接。可行的用法是连任意 Wi-Fi 时建立通道，再切到蜂窝保持；保持期间 WireGuard
   必须是活动 VPN，Surge 会被停用。
 
+### Surge reflect relay (foreground session)
+
+An alternative transport now connects the phone's a-Shell relay to the existing
+VPS console through mutual TLS. It keeps pairing keys on the VPS and supports
+explicit, time-bounded sessions with rollback to the original backend. See
+[`deploy/REFLECT.md`](deploy/REFLECT.md) for packaging, activation and operation.
+All hosts in `fleet.json` can run the relay at once, each with its own CA, like the WireGuard
+fleet: `fleet.py relay-prepare/relay-deploy/relay-start/relay-status/relay-stop/relay-verify`, see
+[`deploy/FLEET-RELAY.md`](deploy/FLEET-RELAY.md). Reaching the consoles from Surge on the phone
+(one `wireguard` policy with every host as a peer) is described in [`deploy/SURGE.md`](deploy/SURGE.md).
+
+Wi-Fi establishment and a 60-second read-only DVT session were verified on the
+current test device. Cellular-only establishment was refused at the phone port.
+Seamless network handoff and background/lock-screen operation are **not** verified;
+keep a-Shell foreground and operate the console from another device for now.
+
 ## 平台支持
 
 | 平台 | 兼容性 | 备注 |

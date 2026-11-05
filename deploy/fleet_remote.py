@@ -60,6 +60,7 @@ table inet simlocation {{
 	chain output {{
 		type filter hook output priority filter; policy accept;
 		oifname "simloc-rsd" meta skuid != @allowed counter reject comment "phone developer services"
+		ip daddr {phone} tcp sport 8446 ct state established counter accept comment "relay replies to a phone-initiated connection"
 		ip daddr {phone} meta skuid != @allowed counter reject comment "phone over WireGuard"
 		ip daddr 127.0.0.1 tcp dport 49151 meta skuid != @allowed counter reject with tcp reset comment "tunneld API"
 		ip daddr {address} tcp dport {web_port} meta skuid != 0 counter reject with tcp reset comment "console: phone and root only"
@@ -515,6 +516,9 @@ def configure_ufw(port, phone, address, web_port):
     run("ufw", "allow", f"{port}/udp", "comment", "SimLocation WireGuard")
     run("ufw", "allow", "in", "on", WG_INTERFACE, "from", phone, "to", address, "port", str(web_port),
         "proto", "tcp", "comment", "SimLocation console")
+    # The relay is also reachable through WireGuard, for hosts whose provider drops inbound TCP.
+    run("ufw", "allow", "in", "on", WG_INTERFACE, "from", phone, "to", address, "port", "8446",
+        "proto", "tcp", "comment", "SimLocation relay over WireGuard")
     return True
 
 
@@ -717,10 +721,85 @@ def status(_params=None):
     }
 
 
+def reflect(params):
+    """Manage only relay assets/session state, using the existing fleet SSH path."""
+    action = params.get('action')
+    manager = APP / 'deploy' / 'reflect_session.py'
+    credentials = ETC / 'relay'
+    state_path = Path('/var/lib/simlocation-relay/session.json')
+    if action == 'status':
+        session_state = {'session': 'not-installed'}
+        if manager.is_file():
+            session_state = json.loads(run('/usr/bin/python3', '-I', str(manager), 'status').stdout)
+        result = status()
+        return {'relay': session_state, 'tunnel': result['tunnel'], 'web': result['web'],
+                'sessions': result['sessions'], 'address': result['address'],
+                'credentials_installed': (credentials / 'expiry.json').is_file()}
+    if action == 'install':
+        if state_path.exists() or any(item.get('alive') for item in active_sessions()):
+            raise RuntimeError('Stop the relay session and location workers before updating')
+        allowed = {'reflect_relay.py', 'reflect_tunneld.py', 'reflect_session.py', 'REFLECT.md', 'FLEET-RELAY.md'}
+        cert_names = {'ca.pem', 'server.pem', 'server-key.pem', 'expiry.json'}
+        if set(params.get('files', {})) != allowed or set(params.get('credentials', {})) != cert_names:
+            raise ValueError('Unexpected relay asset set')
+        public_ip = ipaddress.IPv4Address(params['public_ip'])
+        if not public_ip.is_global:
+            raise ValueError('Relay needs a public IPv4 address')
+        for name, content in params['files'].items():
+            if name.endswith('.py'):
+                compile(content, name, 'exec')
+        if not ETC.is_dir() or ETC.is_symlink():
+            raise RuntimeError('Base deployment configuration is missing or linked')
+        with tempfile.TemporaryDirectory(prefix='.relay-stage-', dir=ETC) as temporary:
+            stage = Path(temporary)
+            for name, encoded in params['credentials'].items():
+                write_file(stage / name, base64.b64decode(encoded, validate=True), 0o600)
+            run('openssl', 'verify', '-purpose', 'sslserver', '-verify_hostname', 'reflect-relay.invalid',
+                '-CAfile', str(stage / 'ca.pem'), str(stage / 'server.pem'))
+            for name in ('ca.pem', 'server.pem'):
+                run('openssl', 'x509', '-in', str(stage / name), '-noout', '-checkend', '10800')
+            certificate_key = run('openssl', 'x509', '-in', str(stage / 'server.pem'), '-pubkey', '-noout').stdout
+            private_public = run('openssl', 'pkey', '-in', str(stage / 'server-key.pem'), '-pubout').stdout
+            if certificate_key != private_public:
+                raise ValueError('Server certificate and private key do not match')
+            expiry = json.loads((stage / 'expiry.json').read_text())['not_after_utc']
+            ensure_dir(credentials, 0o700)
+            for name in cert_names:
+                write_file(credentials / name, (stage / name).read_bytes(), 0o600)
+        for name, content in params['files'].items():
+            write_file(APP / 'deploy' / name, content, 0o644)
+        write_file(credentials / 'endpoint.json', json.dumps({'public_ip': str(public_ip)}), 0o600)
+        return {'installed': True, 'expires_at': expiry, 'started': False}
+    if not manager.is_file():
+        raise RuntimeError('Install relay assets first')
+    if action == 'start':
+        seconds = params.get('seconds', 3600)
+        if seconds is not None and (type(seconds) is not int or not 300 <= seconds <= 7200):
+            raise ValueError('seconds must be between 300 and 7200')
+        endpoint = json.loads((credentials / 'endpoint.json').read_text())
+        limit = ['--persistent'] if seconds is None else ['--seconds', str(seconds)]
+        # Follow the inventory: fleet.py deploy writes AUTO_SET=1 into web.env on one host only.
+        if seconds is None and read_env(ETC / 'web.env').get('SIMLOCATION_WEB_AUTO_SET') == '1':
+            limit.append('--auto-set')
+        result = run('/usr/bin/python3', '-I', str(manager), 'enable', '--credentials', str(credentials),
+                     '--public-ip', endpoint['public_ip'], *limit)
+        return json.loads(result.stdout)
+    if action == 'stop':
+        if not params.get('force', False) and any(item.get('alive') for item in active_sessions()):
+            raise RuntimeError('Clear the active location first, or explicitly use relay-stop --force')
+        return json.loads(run('/usr/bin/python3', '-I', str(manager), 'disable').stdout)
+    if action == 'verify':
+        result = run('runuser', '-u', 'simlocation', '--', 'env', f'HOME={WEB_HOME}',
+                     'PYTHONDONTWRITEBYTECODE=1', str(VENV / 'bin/python'), '-I',
+                     str(APP / 'deploy/verify_device.py'), timeout=60)
+        return {'read_only': True, 'stages': result.stdout.strip().splitlines()}
+    raise ValueError('Unknown relay operation')
+
+
 def main(function, params):
     handlers = {"deploy": deploy, "set_phone_key": set_phone_key, "set_password": set_password,
                 "favorites_get": favorites_get, "favorites_put": favorites_put,
-                "pair_get": pair_get, "status": status}
+                "pair_get": pair_get, "status": status, "reflect": reflect}
     try:
         result = {"ok": True, "result": handlers[function](params)}
     except Exception as exc:

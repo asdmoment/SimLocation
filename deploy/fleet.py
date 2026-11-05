@@ -39,7 +39,9 @@ LOCK = DEPLOY / "requirements.lock"
 UNITS = DEPLOY / "systemd"
 MARKER = "@@SIMLOCATION-RESULT@@"
 BUNDLE = ["VERSION", "LICENSE", "bin/simlocation.py", "bin/simlocation_web.py", "deploy/README.md",
-          "deploy/network_tunneld.py", "deploy/verify_device.py", "deploy/hold_probe.py"]
+          "deploy/network_tunneld.py", "deploy/verify_device.py", "deploy/hold_probe.py",
+          "deploy/reflect_relay.py", "deploy/reflect_tunneld.py", "deploy/reflect_session.py",
+          "deploy/REFLECT.md", "deploy/FLEET-RELAY.md"]
 # Without 0/o and 1/l/i: four groups of six give about 119 bits.
 PASSWORD_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 PAIR_KEYS = ("private_key", "public_key")
@@ -364,6 +366,48 @@ def cmd_favorites(inventory, args):
             print(f"{name}: 写入 {count} 个收藏")
 
 
+def cmd_surge(inventory, args):
+    from surge_export import export_bundle
+    source = Path(args.wg_config).expanduser()
+    if source.suffix.lower() != '.conf' or not source.is_file() or source.is_symlink():
+        raise FleetError('请提供官方 WireGuard 导出的常规 .conf 文件；ZIP 请先解压')
+    output = export_bundle(inventory, source.read_text(), None, args.out)
+    print(f'Surge 私有配置已导出：{args.out}；包含现有手机 WireGuard 私钥，请只导入原手机。')
+    print('没有轮换密钥或修改服务器。只将四个控制台 /32 规则放到局域网 DIRECT 规则前。')
+
+
+def cmd_relay_prepare(inventory, args):
+    from reflect_fleet import prepare
+    endpoints = {name: endpoint(host) for name, host in inventory['hosts'].items()}
+    archive = prepare(inventory, args.out, endpoints, args.days)
+    print(f'四节点手机私有包：{archive}')
+    print('每台独立 mTLS 身份；没有修改 WireGuard 密钥、配对记录或任何远程服务。')
+
+
+def cmd_relay(inventory, args):
+    from reflect_fleet import bundle_params
+    action = args.command.removeprefix('relay-')
+    failures = []
+    for name in select(inventory, args.hosts):
+        try:
+            if action == 'deploy':
+                params = bundle_params(inventory, name, args.credentials)
+            else:
+                params = {'action': action}
+                if action == 'start':
+                    params['seconds'] = None if args.persistent else args.seconds
+                if action == 'stop':
+                    params['force'] = args.force
+            result = remote(inventory, name, 'reflect', params, timeout=180)
+            print(name + ': ' + json.dumps(result, ensure_ascii=False))
+        except (FleetError, OSError, ValueError) as exc:
+            failures.append(name)
+            print(f'{name}: 失败：{exc}')
+    if failures:
+        print('失败节点：' + ', '.join(failures) + '；其他节点的成功操作保留，请逐台查看 relay-status。')
+        raise SystemExit(1)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -379,10 +423,29 @@ def main(argv=None):
     favorites = sub.add_parser("favorites")
     favorites.add_argument("--from", dest="source", required=True)
     favorites.add_argument("hosts", nargs="*")
+    surge = sub.add_parser('surge', help='复用官方 WireGuard .conf 导出四 peer Surge 私有配置')
+    surge.add_argument('--wg-config', required=True)
+    surge.add_argument('--out', required=True)
+    prepare = sub.add_parser('relay-prepare', help='生成各节点独立的 mTLS 凭据和四节点手机包')
+    prepare.add_argument('--out', required=True)
+    prepare.add_argument('--days', type=int, default=30)
+    for name in ('deploy', 'start', 'status', 'stop', 'verify'):
+        command = sub.add_parser('relay-' + name)
+        command.add_argument('hosts', nargs='*')
+        if name == 'deploy':
+            command.add_argument('--credentials', required=True)
+        if name == 'start':
+            command.add_argument('--seconds', type=int, default=3600)
+            command.add_argument('--persistent', action='store_true',
+                                 help='常驻：不设到期、开机自启，只在 relay-stop 时回到 WireGuard 后端')
+        if name == 'stop':
+            command.add_argument('--force', action='store_true', help='允许断开仍有定位 worker 的节点；不会发送清除坐标')
     args = parser.parse_args(argv)
     inventory = load_inventory()
     handler = {"status": cmd_status, "deploy": cmd_deploy, "phone": cmd_phone,
-               "password": cmd_password, "favorites": cmd_favorites}[args.command]
+               "password": cmd_password, "favorites": cmd_favorites, 'surge': cmd_surge,
+               'relay-prepare': cmd_relay_prepare,
+               **{'relay-' + n: cmd_relay for n in ('deploy', 'start', 'status', 'stop', 'verify')}}[args.command]
     try:
         handler(inventory, args)
     except FleetError as exc:
