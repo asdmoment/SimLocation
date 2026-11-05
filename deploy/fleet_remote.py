@@ -60,7 +60,7 @@ table inet simlocation {{
 	chain output {{
 		type filter hook output priority filter; policy accept;
 		oifname "simloc-rsd" meta skuid != @allowed counter reject comment "phone developer services"
-		ip daddr {phone} tcp sport 8446 ct state established counter accept comment "relay replies to a phone-initiated connection"
+		ip daddr {phone} tcp sport 8446 meta skgid {tunnel_gid} ct state established counter accept comment "relay replies to a phone-initiated connection"
 		ip daddr {phone} meta skuid != @allowed counter reject comment "phone over WireGuard"
 		ip daddr 127.0.0.1 tcp dport 49151 meta skuid != @allowed counter reject with tcp reset comment "tunneld API"
 		ip daddr {address} tcp dport {web_port} meta skuid != 0 counter reject with tcp reset comment "console: phone and root only"
@@ -522,8 +522,11 @@ def configure_ufw(port, phone, address, web_port):
     return True
 
 
-def configure_nft(web_uid, tunnel_uid, phone, address, web_port):
-    text = NFT_TEMPLATE.format(web_uid=web_uid, tunnel_uid=tunnel_uid, phone=phone, address=address, web_port=web_port)
+def configure_nft(web_uid, tunnel_uid, tunnel_gid, phone, address, web_port):
+    # The relay runs as a dynamic user in the simlocation-tunnel group: match that group, not just the port,
+    # so another local user who binds 8446 while the relay is down cannot answer the phone.
+    text = NFT_TEMPLATE.format(web_uid=web_uid, tunnel_uid=tunnel_uid, tunnel_gid=tunnel_gid, phone=phone,
+                               address=address, web_port=web_port)
     with tempfile.NamedTemporaryFile("w", suffix=".nft", delete=False) as handle:
         handle.write(text)
     try:
@@ -592,7 +595,7 @@ def deploy(params):
     units_changed = [name for name, text in params["units"].items() if write_file(SYSTEMD / name, text, 0o644)]
     if units_changed:
         run("systemctl", "daemon-reload")
-    firewall_changed = configure_nft(web_owner[0], tunnel_owner[0], phone, address, web_port)
+    firewall_changed = configure_nft(web_owner[0], tunnel_owner[0], tunnel_owner[1], phone, address, web_port)
     report["ufw"] = configure_ufw(port, phone, address, web_port)
 
     for unit in ("simlocation-firewall", "simlocation-network", "simlocation-web"):

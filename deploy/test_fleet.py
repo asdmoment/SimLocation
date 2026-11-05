@@ -116,11 +116,15 @@ class PeerRouteTests(unittest.TestCase):
 class RemoteHelperTests(unittest.TestCase):
     def test_nft_rules_name_the_service_accounts_and_addresses(self):
         with patch.object(remote, "run"), patch.object(remote, "write_file", return_value=True) as write:
-            self.assertTrue(remote.configure_nft(990, 991, "10.77.77.2", "10.77.77.11", 8765))
+            self.assertTrue(remote.configure_nft(990, 991, 992, "10.77.77.2", "10.77.77.11", 8765))
         text = write.call_args.args[1]
         self.assertIn("elements = { 0, 990, 991 }", text)
         self.assertIn("ip daddr 10.77.77.2 meta skuid != @allowed", text)
         self.assertIn("ip daddr 10.77.77.11 tcp dport 8765 meta skuid != 0", text)
+        relay = [l.strip() for l in text.splitlines() if "tcp sport 8446" in l]
+        self.assertEqual(len(relay), 1)
+        self.assertIn("meta skgid 992 ct state established", relay[0], "relay replies match its group")
+        self.assertLess(text.index("tcp sport 8446"), text.index("ip daddr 10.77.77.2 meta skuid != @allowed"))
         lines = [line for line in text.splitlines() if not line.startswith("#")]
         self.assertEqual(lines[:2], ["table inet simlocation", "delete table inet simlocation"],
                          "reload replaces only our table")
