@@ -10,6 +10,7 @@ const { test } = require("node:test");
 
 function loadMap(provider, routeMode, loop = false, embedded = false) {
   const nodes = new Map();
+  const markers = [];
   function element() {
     return { style: {}, listeners: {}, disabled: false, hidden: true,
       addEventListener(name, fn) { this.listeners[name] = fn; },
@@ -36,7 +37,8 @@ function loadMap(provider, routeMode, loop = false, embedded = false) {
   }
   const L = {
     map: () => layer(), tileLayer: () => layer(), layerGroup: () => layer(),
-    polyline: () => layer(), marker: position => layer({ position }),
+    polyline: () => layer(), marker: (position, options) => { const pin = layer({ position, options }); markers.push(pin); return pin; },
+    icon: options => options,
   };
   const AMap = {
     Map: function () { return layer(); }, Marker: function (opts) { return layer(opts); },
@@ -69,7 +71,7 @@ function loadMap(provider, routeMode, loop = false, embedded = false) {
     if (provider === "osm") context.placeMarker(lat, lon);
     else context.placeMarker(lon, lat);
   }
-  return { context, nodes, add };
+  return { context, nodes, add, markers };
 }
 
 for (const provider of ["osm", "amap"]) {
@@ -127,6 +129,19 @@ for (const provider of ["osm", "amap"]) {
     assert.equal(context.sent, undefined);
   });
 }
+
+test("osm: point and route pins are inline SVG, never a fetched PNG", () => {
+  const point = loadMap("osm", false);
+  point.add(1.28, -103.85);
+  const route = loadMap("osm", true);
+  route.add(1.28, -103.85);
+  const pins = [...point.markers, ...route.markers];
+  assert.ok(pins.length >= 2);
+  for (const pin of pins) {
+    assert.match(pin.options.options.icon.iconUrl, /^data:image\/svg\+xml;/);
+    assert.equal(pin.options.options.icon.iconRetinaUrl, undefined);
+  }
+});
 
 test("every pinned CDN resource carries an integrity hash", () => {
   // Catches a new CDN reference added without SRI, or an integrity attribute

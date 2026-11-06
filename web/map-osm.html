@@ -183,13 +183,23 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
 
 /* ---- Route editing (no-op unless the CLI started us in route mode) ---- */
 var routeLayers = L.layerGroup().addTo(map);
+// The pin is drawn inline: Leaflet's default icon is a PNG fetched on the
+// first click, and when that one request fails (a flaky hotspot, or a console
+// restart that ended the session) Safari shows a broken-image "?" for good.
+var PIN_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="25" height="41" viewBox="0 0 25 41">' +
+  '<path d="M12.5 1C6.2 1 1 6.2 1 12.5 1 21.1 12.5 40 12.5 40S24 21.1 24 12.5C24 6.2 18.8 1 12.5 1z" ' +
+  'fill="#2a81cb" stroke="#1d5f96" stroke-width="1.2"/><circle cx="12.5" cy="12.5" r="4.6" fill="#fff"/></svg>';
+var pinIcon = L.icon({
+  iconUrl: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(PIN_SVG),
+  iconSize: [25, 41], iconAnchor: [12.5, 40], popupAnchor: [0, -34], tooltipAnchor: [12, -26],
+});
 initRouteEditor(function (points) {
   routeLayers.clearLayers();
   var line = points.slice();
   if (routeLoop && line.length > 1) line.push(line[0]);
   if (line.length > 1) L.polyline(line, { color: "#1677ff", weight: 4 }).addTo(routeLayers);
   points.forEach(function (point, index) {
-    var pin = L.marker(point, { draggable: !routeSubmitted, title: "途经点 " + (index + 1) }).addTo(routeLayers);
+    var pin = L.marker(point, { icon: pinIcon, draggable: !routeSubmitted, title: "途经点 " + (index + 1) }).addTo(routeLayers);
     pin.bindTooltip(String(index + 1), { permanent: true, direction: "top" });
     pin.on("dragend", function () {
       var pos = pin.getLatLng();
@@ -209,7 +219,7 @@ function placeMarker(lat, lng) {
   if (marker) {
     marker.setLatLng([lat, lng]);
   } else {
-    marker = L.marker([lat, lng], { draggable: true }).addTo(map);
+    marker = L.marker([lat, lng], { icon: pinIcon, draggable: true }).addTo(map);
     marker.on("dragend", function () {
       var pos = marker.getLatLng();
       updateCoords(pos.lat, pos.lng);
