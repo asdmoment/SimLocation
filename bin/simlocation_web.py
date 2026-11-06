@@ -170,6 +170,14 @@ AUTO_SET_POLL_SECONDS = 3.0
 AUTO_SET_MIN_ABSENCE_SECONDS = 60.0
 AUTO_SET_PENDING_SECONDS = 120.0
 AUTO_SET_NOTE = "[*] 手机的开发者通道刚建立，自动设到默认位置。"
+# A phone relay (a-Shell) is suspended while its browser is in front, so the
+# button that sets or clears a location is pressed exactly when the phone is
+# unreachable. Such a request waits and runs once the phone answers again.
+WAITING_ACTIONS = frozenset({"set", "route", "clear"})
+WAITING_SECONDS = 1800.0
+WAITING_NOTE = ("[*] 手机暂时连不上（a-Shell 在后台、锁屏或断网）。切回 a-Shell，"
+                "开发者通道恢复后会自动执行；{minutes} 分钟内有效，可以取消。")
+RESUME_NOTE = "[*] 手机已重新连上，执行刚才等待的操作。"
 
 
 def auto_set_enabled():
@@ -357,12 +365,15 @@ def clean_favorite_name(value):
 class WebConsole:
     """One serialized operation at a time; status reads never wait for device I/O."""
 
-    def __init__(self, cli, pmd3_bin, args):
+    def __init__(self, cli, pmd3_bin, args, clock=time.monotonic):
         self.cli = cli
         self.pmd3_bin = pmd3_bin
         self.args = args
+        self.clock = clock
         self.map_proxy = MapProxy(cli)
         self.cleared_by_hand = set()  # UDIDs (or "*" for clear_all) cleared since their last set
+        self.waiting = None  # the one location request held until the phone answers
+        self.manual_sequence = 0  # counts location requests the user made (or resumed)
         self.lock = threading.RLock()
         self.favorites_lock = threading.Lock()
         self.tunnel_lock = threading.Lock()
@@ -415,6 +426,63 @@ class WebConsole:
         requested = self.args.device or os.environ.get("SIMLOCATION_UDID") or config.get("default")
         return self.cli.resolve_alias(requested, config) if requested else None
 
+    def device_reachable(self, udid):
+        """True when one of tunneld's RSDs for udid accepts a connection; None if tunneld is silent."""
+        try:
+            response = self.cli.requests.get(self.cli.TUNNELD_URL, timeout=1)
+            response.raise_for_status()
+            data = response.json()
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        pairs = self.cli.extract_rsd_pairs(data[udid]) if udid in data else []
+        return any(self.cli.is_rsd_reachable(host, port, quiet=True) for host, port in pairs)
+
+    def waiting_for(self, udid):
+        with self.lock:
+            return bool(self.waiting and self.waiting["udid"] == udid)
+
+    def cancel_waiting(self):
+        with self.lock:
+            if not self.waiting:
+                raise ValueError("没有等待中的操作。")
+            self.finish_waiting("cancelled", "[*] 已取消等待中的操作。")
+            return copy.deepcopy(self.job)
+
+    def finish_waiting(self, status, message):
+        """Drop the held request and close its job; caller holds the lock."""
+        held, self.waiting = self.waiting, None
+        if held and self.job and self.job["id"] == held["job"] and self.job["status"] == "waiting":
+            self.job["status"] = status
+            self.job["messages"].append(message)
+
+    def resume_waiting(self):
+        """Run the held request once the phone's RSD answers; called every few seconds."""
+        with self.lock:
+            held = self.waiting
+        if not held:
+            return None
+        if self.clock() >= held["deadline"]:
+            with self.lock:
+                if self.waiting is held:
+                    minutes = round(WAITING_SECONDS / 60)
+                    self.finish_waiting("expired", f"[!] 等了 {minutes} 分钟手机仍没连上，已放弃这次操作。")
+            return "expired"
+        tunnels = self.tunnel_status()
+        if not tunnels or held["udid"] not in tunnels or not self.device_reachable(held["udid"]):
+            return None
+        try:
+            self.submit(held["data"], note=RESUME_NOTE, resume=held)
+        except BusyError:
+            return "busy"
+        except ValueError:
+            with self.lock:
+                if self.waiting is held:
+                    self.finish_waiting("failed", "[!] 等待中的操作已失效，请重新提交。")
+            return "invalid"
+        return "submitted"
+
     def manually_cleared(self, udid):
         with self.lock:
             return udid in self.cleared_by_hand or "*" in self.cleared_by_hand
@@ -433,6 +501,9 @@ class WebConsole:
             discovered = list(self.discovered)
             job = copy.deepcopy(self.job)
             scanned_at = self.scanned_at
+            waiting = ({"action": self.waiting["action"], "device": self.waiting["udid"],
+                        "expires_in": max(0, int(self.waiting["deadline"] - self.clock()))}
+                       if self.waiting else None)
         known = set(discovered) | set(config["aliases"].values())
         known.update(path.name.removesuffix(".state.json")
                      for path in cli.RUNTIME_DIR.glob("*.state.json"))
@@ -458,7 +529,7 @@ class WebConsole:
             "provider": "amap" if os.environ.get("SIMLOCATION_AMAP_KEY", "").strip() else "osm",
             "max_route_bytes": cli.MAX_ROUTE_BYTES, "max_route_points": cli.MAX_ROUTE_POINTS,
             "defaults": self.default_point(), "tunnels": self.tunnel_status(),
-            "auto_set": auto_set_enabled(),
+            "auto_set": auto_set_enabled(), "waiting": waiting,
         }
 
     def favorites_path(self):
@@ -602,21 +673,35 @@ class WebConsole:
         if failed:
             raise ValueError("部分设备清除失败，请重试：" + ", ".join(failed))
 
-    def submit(self, data, note=None):
+    def submit(self, data, note=None, resume=None):
+        """Start one job. note marks an automatic set; resume is the held request being re-run."""
+        if data.get("action") == "cancel_waiting":
+            return self.cancel_waiting()
         with self.lock:
             if self.job and self.job["status"] == "running":
                 raise BusyError("已有操作正在执行，请等待结果。")
+            if resume is not None and self.waiting is not resume:
+                raise ValueError("等待中的操作已被取消或替换。")
             action, udid, log_path, callback = self.prepare(data)
+            manual = note is None or resume is not None
             if action in ("set", "route"):
                 self.cleared_by_hand.discard(udid)
                 self.cleared_by_hand.discard("*")
-            elif action in ("clear", "clear_all") and not note:
+            elif action in ("clear", "clear_all") and manual:
                 self.cleared_by_hand.add(udid if action == "clear" else "*")
+            retry = None
+            if manual and action in WAITING_ACTIONS | {"clear_all"}:
+                # The newest location request wins over a held one.
+                self.manual_sequence += 1
+                self.finish_waiting("superseded", "[*] 已被新的操作取代。")
+                if action in WAITING_ACTIONS:
+                    deadline = resume["deadline"] if resume else self.clock() + WAITING_SECONDS
+                    retry = {"data": copy.deepcopy(data), "udid": udid, "action": action, "deadline": deadline}
             self.sequence += 1
             self.job = {"id": self.sequence, "action": action, "device": udid,
                         "status": "running", "messages": [note] if note else [], "result": None,
-                        "auto": bool(note)}
-            self.worker = threading.Thread(target=self.execute, args=(callback, log_path))
+                        "auto": not manual}
+            self.worker = threading.Thread(target=self.execute, args=(callback, log_path, self.sequence, retry))
             self.worker.start()
             return copy.deepcopy(self.job)
 
@@ -625,7 +710,7 @@ class WebConsole:
             self.job["messages"].append(str(message))
             self.job["messages"] = self.job["messages"][-100:]
 
-    def execute(self, callback, log_path):
+    def execute(self, callback, log_path, job_id=None, retry=None):
         self.cli.LOG_CONTEXT.sink = self.record
         result, status = None, "succeeded"
         try:
@@ -637,8 +722,17 @@ class WebConsole:
             self.record(str(exc) if not isinstance(exc, SystemExit) else "操作失败，请查看上方日志或运行诊断。")
         finally:
             self.cli.LOG_CONTEXT.sink = None
-            with self.lock:
-                self.job.update(status=status, result=result)
+        # A failure with the phone out of reach is held instead: the phone's
+        # relay is usually suspended because this very page is in front.
+        if status == "failed" and retry and self.clock() < retry["deadline"]:
+            if self.device_reachable(retry["udid"]) is False:
+                status = "waiting"
+                minutes = max(1, round((retry["deadline"] - self.clock()) / 60))
+                self.record(WAITING_NOTE.format(minutes=minutes))
+        with self.lock:
+            if status == "waiting":
+                self.waiting = {**retry, "job": job_id}
+            self.job.update(status=status, result=result)
 
     def close(self):
         if self.worker:
@@ -660,7 +754,7 @@ class AutoSetter:
         self.present = None  # unknown until tunneld first answers
         self.absent_since = None
         self.pending_until = None
-        self.stopped = threading.Event()
+        self.sequence_at_return = None
 
     def tick(self):
         tunnels = self.app.tunnel_status()
@@ -679,8 +773,13 @@ class AutoSetter:
             if self.app.manually_cleared(udid) and now - self.absent_since < AUTO_SET_MIN_ABSENCE_SECONDS:
                 return "suppressed"
             self.pending_until = now + AUTO_SET_PENDING_SECONDS
+            self.sequence_at_return = self.app.manual_sequence
         if self.pending_until is None:
             return None
+        if self.app.waiting_for(udid) or self.app.manual_sequence != self.sequence_at_return:
+            # The user's own request (held, or made since the return) decides the location.
+            self.pending_until = None
+            return "superseded"
         if now > self.pending_until:
             self.pending_until = None
             return "expired"
@@ -701,10 +800,16 @@ class AutoSetter:
         self.pending_until = None
         return "submitted"
 
-    def run(self):
-        while not self.stopped.wait(AUTO_SET_POLL_SECONDS):
+
+
+def watch_phone(app, auto_setter, stopped):
+    """Every few seconds: the automatic set first (it yields to a held request), then the held request."""
+    while not stopped.wait(AUTO_SET_POLL_SECONDS):
+        if auto_setter:
             with suppress(Exception):
-                self.tick()
+                auto_setter.tick()
+        with suppress(Exception):
+            app.resume_waiting()
 
 
 def cookie_value(header, name):
@@ -1061,10 +1166,11 @@ def run_web_console(cli, args, pmd3_bin):
     if auto_set_enabled():
         if server.app.default_point():
             auto_setter = AutoSetter(server.app)
-            threading.Thread(target=auto_setter.run, daemon=True).start()
             cli.log_message("[*] 已开启：手机连上 WireGuard、开发者通道建立后，自动设到默认位置。")
         else:
             cli.log_message("[!] SIMLOCATION_WEB_AUTO_SET 已开启，但没有有效的默认坐标，自动设定位不会生效。")
+    stopped = threading.Event()
+    threading.Thread(target=watch_phone, args=(server.app, auto_setter, stopped), daemon=True).start()
     server.app.submit({"action": "discover"})
     if open_browser and cli.is_loopback_host(listen):
         cli._open_app_window(urls[0])
@@ -1073,7 +1179,6 @@ def run_web_console(cli, args, pmd3_bin):
     except KeyboardInterrupt:
         cli.log_message("[*] 正在关闭网页服务，等待当前操作完成。")
     finally:
-        if auto_setter:
-            auto_setter.stopped.set()
+        stopped.set()
         server.server_close()
         server.app.close()

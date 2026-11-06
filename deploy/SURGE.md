@@ -72,5 +72,6 @@ IP-CIDR,10.77.77.31/32,SimLocation-WG,no-resolve
 `10.77.77.1:8446` 走的就是上面那条 `IP-CIDR,10.77.77.1/32,SimLocation-WG`。所以删掉或改坏这条策略，vps-b
 的中继就断；另外三台走公网，不受影响。每次 `relay-prepare` 重新生成手机包后，都要再改一次 `phone.json`。
 
-设备通道本身由 `reflect_relay.py` 和服务器上的限时中继会话负责，手机上还要开着 Surge 模块 SimLocation Reflect
-（`10.7.0.1 = reflect`），见 `REFLECT.md`。会话到期后手机端会一直显示 `RECONNECTING`，这是服务器入口已关闭，不是手机的问题。
+设备通道本身由 `reflect_relay.py` 和服务器上的常驻中继会话负责，手机上还要开着 Surge 模块 SimLocation Reflect
+（`10.7.0.1 = reflect`），见 `FLEET-RELAY.md`。手机端一直显示 `RECONNECTING` 时，先用 `fleet.py relay-status`
+看服务器上的会话是不是已被 `relay-stop` 停掉。

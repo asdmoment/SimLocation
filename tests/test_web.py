@@ -29,6 +29,10 @@ PASSWORD = "correct-horse-battery-staple"
 PASSWORD_HASH = web.hash_password(PASSWORD)
 
 
+def exit_one():
+    raise SystemExit(1)
+
+
 class WebConsoleTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
@@ -260,6 +264,120 @@ class WebConsoleTests(unittest.TestCase):
             self.app.worker.join()
         self.assertTrue(job["auto"])
         self.assertEqual(self.request()[1]["job"]["messages"][0], web.AUTO_SET_NOTE)
+
+    def hold_until_reachable(self):
+        """The phone is out of reach until reachable[0] turns True."""
+        clock, reachable = [0.0], [False]
+        self.app.clock = lambda: clock[0]
+        self.app.device_reachable = lambda udid: reachable[0]
+        self.app.tunnel_status = lambda: [PHONE] if reachable[0] else []
+        return clock, reachable
+
+    def test_request_waits_while_the_phone_is_unreachable_and_runs_on_return(self):
+        clock, reachable = self.hold_until_reachable()
+        calls = []
+
+        def set_location(lat, lon, *_args, **_kwargs):
+            calls.append((lat, lon))
+            if not reachable[0]:
+                raise SystemExit(1)
+
+        with patch.object(cli, "auto_set_location", side_effect=set_location):
+            job = self.app.submit({"action": "set", "device": PHONE, "lat": 1, "lon": 2})
+            self.app.worker.join()
+            self.assertEqual(self.app.job["status"], "waiting")
+            self.assertIn("切回 a-Shell", self.app.job["messages"][-1])
+            waiting = self.request()[1]["waiting"]
+            self.assertEqual((waiting["action"], waiting["device"]), ("set", PHONE))
+            self.assertIsNone(self.app.resume_waiting(), "still unreachable: nothing to do")
+            clock[0] = 600
+            reachable[0] = True
+            self.assertEqual(self.app.resume_waiting(), "submitted")
+            self.app.worker.join()
+        self.assertEqual(calls, [(1.0, 2.0), (1.0, 2.0)])
+        self.assertEqual(self.app.job["status"], "succeeded")
+        self.assertGreater(self.app.job["id"], job["id"])
+        self.assertEqual(self.app.job["messages"][0], web.RESUME_NOTE)
+        self.assertFalse(self.app.job["auto"])
+        self.assertIsNone(self.app.waiting)
+        self.assertIsNone(self.request()[1]["waiting"])
+
+    def test_failure_with_a_reachable_phone_is_a_real_failure(self):
+        self.app.device_reachable = lambda udid: True
+        with patch.object(cli, "clear_location", side_effect=SystemExit(1)):
+            self.app.submit({"action": "clear", "device": PHONE})
+            self.app.worker.join()
+        self.assertEqual(self.app.job["status"], "failed")
+        self.assertIsNone(self.app.waiting)
+        self.app.device_reachable = lambda udid: None  # tunneld silent: nothing to wait for
+        with patch.object(cli, "clear_location", side_effect=SystemExit(1)):
+            self.app.submit({"action": "clear", "device": PHONE})
+            self.app.worker.join()
+        self.assertEqual(self.app.job["status"], "failed")
+
+    def test_waiting_clear_counts_as_a_manual_clear_when_it_runs(self):
+        _clock, reachable = self.hold_until_reachable()
+        with patch.object(cli, "clear_location", side_effect=lambda *a, **k: None if reachable[0] else exit_one()):
+            self.app.submit({"action": "clear", "device": PHONE})
+            self.app.worker.join()
+            self.app.cleared_by_hand.clear()
+            reachable[0] = True
+            self.assertEqual(self.app.resume_waiting(), "submitted")
+            self.app.worker.join()
+        self.assertEqual(self.app.job["status"], "succeeded")
+        self.assertTrue(self.app.manually_cleared(PHONE))
+
+    def test_newer_request_cancel_and_deadline_end_a_waiting_request(self):
+        clock, _reachable = self.hold_until_reachable()
+        with patch.object(cli, "clear_location", side_effect=SystemExit(1)), \
+                patch.object(cli, "auto_set_location", side_effect=SystemExit(1)):
+            self.app.submit({"action": "set", "device": PHONE, "lat": 1, "lon": 2})
+            self.app.worker.join()
+            first = self.app.waiting
+            self.app.submit({"action": "clear", "device": PHONE})
+            self.app.worker.join()
+            self.assertIsNot(self.app.waiting, first)
+            self.assertEqual(self.app.waiting["action"], "clear")
+            status, job = self.request("/api/action", {"action": "cancel_waiting"})
+            self.assertEqual((status, job["status"]), (202, "cancelled"))
+            self.assertIsNone(self.app.waiting)
+            self.assertEqual(self.request("/api/action", {"action": "cancel_waiting"})[0], 400)
+            self.app.submit({"action": "clear", "device": PHONE})
+            self.app.worker.join()
+        clock[0] = web.WAITING_SECONDS + 1
+        self.assertEqual(self.app.resume_waiting(), "expired")
+        self.assertEqual(self.app.job["status"], "expired")
+        self.assertIsNone(self.app.waiting)
+
+    def test_discover_does_not_drop_a_waiting_request(self):
+        self.hold_until_reachable()
+        with patch.object(cli, "clear_location", side_effect=SystemExit(1)), \
+                patch.object(cli, "discover_devices", return_value=[]):
+            self.app.submit({"action": "clear", "device": PHONE})
+            self.app.worker.join()
+            self.app.submit({"action": "discover"})
+            self.app.worker.join()
+        self.assertTrue(self.app.waiting_for(PHONE))
+
+    def test_auto_set_yields_to_the_users_own_request(self):
+        tunnels = [[]]
+        setter, clock, submitted = self.auto_setter(tunnels)
+        setter.tick()
+        self.app.waiting = {"udid": PHONE, "job": 0, "deadline": 1e9, "action": "clear", "data": {}}
+        tunnels[0] = [PHONE]
+        clock[0] = 100
+        self.assertEqual(setter.tick(), "superseded")
+        self.app.waiting = None
+        tunnels[0] = []
+        clock[0] = 110
+        setter.tick()
+        tunnels[0] = [PHONE]
+        clock[0] = 300
+        self.app.submit = lambda data, note=None: (_ for _ in ()).throw(web.BusyError("busy"))
+        self.assertEqual(setter.tick(), "busy")
+        self.app.manual_sequence += 1  # the user set a place while the automatic set was queued
+        self.assertEqual(setter.tick(), "superseded")
+        self.assertEqual(submitted, [])
 
     def test_web_command_accepts_common_and_remote_options(self):
         args = cli.parse_args(["--device", "phone", "web", "--remote", "--port", "8765", "--debug"])

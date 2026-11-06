@@ -383,8 +383,10 @@ fleet: `fleet.py relay-prepare/relay-deploy/relay-start/relay-status/relay-stop/
 
 Wi-Fi establishment and a 60-second read-only DVT session were verified on the
 current test device. Cellular-only establishment was refused at the phone port.
-Seamless network handoff and background/lock-screen operation are **not** verified;
-keep a-Shell foreground and operate the console from another device for now.
+Seamless network handoff is **not** verified. In the background a-Shell is
+suspended after a short while, so a set, route or clear pressed in the phone's own
+browser usually finds the phone out of reach: the console then shows it as
+「等待手机」 and runs it once a-Shell is back in front (30 minutes, cancellable).
 
 ## 平台支持
 

@@ -315,9 +315,14 @@ function renderJob(job) {
   if (!job) return;
   $("operation").hidden = false;
   $("operation").dataset.status = job.status;
-  const status = { running: "进行中", succeeded: "已完成", failed: "失败" }[job.status];
+  const status = { running: "进行中", succeeded: "已完成", failed: "失败", waiting: "等待手机",
+    cancelled: "已取消", expired: "已放弃", superseded: "已被取代" }[job.status] || job.status;
   $("operation-title").textContent = `${actionNames[job.action] || job.action} / ${status}`;
+  const waiting = snapshot && snapshot.waiting;
+  $("cancel-waiting").hidden = job.status !== "waiting";
   $("operation-detail").textContent = job.status === "running" ? "连接设备可能需要数十秒，请等待结果。" :
+    job.status === "waiting" ? "切回 a-Shell，手机重新连上后会自动执行" +
+      (waiting ? `（还会等 ${Math.ceil(waiting.expires_in / 60)} 分钟）。` : "。") :
     job.action === "discover" && job.result ? `发现 ${job.result.count} 台设备。` : job.device ? `设备 ${job.device}` : "";
   $("operation-log").textContent = job.messages.join("\n") || (job.status === "running" ? "等待操作结果…" : "操作已完成。");
   if (job.status === "failed") $("operation").querySelector("details").open = true;
@@ -404,6 +409,7 @@ $("doctor").onclick = () => perform("doctor");
 $("set-default").onclick = () => perform("device_default");
 $("alias-form").onsubmit = event => { event.preventDefault(); perform("device_add", { alias: $("alias").value.trim() }); };
 $("clear-location").onclick = $("clear-point").onclick = () => perform("clear");
+$("cancel-waiting").onclick = () => perform("cancel_waiting");
 $("favorite-form").onsubmit = async event => {
   event.preventDefault();
   const name = $("favorite-name").value.trim();
