@@ -4,6 +4,16 @@
 
 ---
 
+## 手机端 Swiplet
+
+`swiplet/` 是运行在 Swipt 里的手机端版本：Apple 地图选点、坐标输入、收藏（与 `var/favorites.json` 互通）、路线绘制和 JSON/GPX 导入、速度与位置扰动、循环路线、恢复真实定位。正常使用不需要 Mac、VPS 或 a-Shell 中继，配对和开发者连接由 Swipt 管理。
+
+在 `swiplet/` 里运行 `npm ci --ignore-scripts && npm run build`，把生成的 `dist/simlocation.swiplet` 导入 Swipt。用法、快捷指令和只有蜂窝网络时的做法见 [Swiplet README](swiplet/README.md)。请不要和 StikDebug、其他模拟位置 Swiplet 或旧 VPS 中继同时控制定位。
+
+原 CLI、网页控制台和 VPS 部署均保留，使用说明如下。
+
+---
+
 ## 应用场景
 
 * App 定位调试：调试依赖地理位置的 iOS App。

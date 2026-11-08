@@ -31,7 +31,7 @@
 
 ## Tooling Reality
 
-- There is no `pyproject.toml`, `package.json`, `Makefile`, `pytest.ini`, or `tox.ini`.
+- There is no root `pyproject.toml`, `package.json`, `Makefile`, `pytest.ini`, or `tox.ini`. The independent `swiplet/` package has its own npm manifest and lockfile.
 - There is no repo-defined lint command.
 - The committed automated tests use the standard-library `unittest` runner.
 - Treat this as a script-first repository with narrow automated and manual verification.
@@ -96,7 +96,10 @@
 
 ## Build Guidance
 
-- There is no build step.
+- The original Python/web tools have no build step.
+- The standalone `swiplet/` package is built with the official Swipt CLI and has no runtime dependencies (everything it imports is provided by Swipt). From that directory run `npm ci --ignore-scripts`, `npm run check`, `npm test`, and `npm run build`; output is `dist/simlocation.swiplet`. Tests need Node.js 22.13+ for `node:sqlite` and never contact a phone. `assets/NOTICE.txt` ships the coordinate-code attribution, because the CLI's Babel pass strips source comments.
+- The interface, each action call and the service run in separate JS runtimes and share `simlocation.db` through `src/store.ts`, never module globals. Point and clear actions call `simulatedLocation.set` themselves (Swipt persists and restores that location); the service only plays routes, checking the newest request id once a second. Keep `simlocation/probeConnection` and its `{connected, error}` result stable: the user's `SimLocationCellular` shortcut calls it.
+- Cellular assistance is a user-run Shortcuts workflow opened from a Link in the interface. Do not toggle networks silently, and keep probe failures a result rather than an error, so the shortcut always turns cellular data back on.
 - Do not invent `make build`, `npm run build`, or packaging flows unless you add them and document them.
 
 ## Source Of Truth For Behavior

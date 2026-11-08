@@ -1,0 +1,38 @@
+{
+  "name": "simlocation-swiplet",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "swiplet": {
+    "id": "simlocation",
+    "versionCode": 2,
+    "name": "SimLocation",
+    "localizedNames": {
+      "zh-Hans": "SimLocation 定位"
+    },
+    "icon": {
+      "color": "blue",
+      "symbol": "location.north.line"
+    },
+    "app": "./src/App.tsx",
+    "extension": "./src/extension.ts"
+  },
+  "scripts": {
+    "build": "swipt project build",
+    "check": "tsc",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@expo/ui": "58.0.26",
+    "@swipt/api": "0.1.0-nightly.60",
+    "@swipt/cli": "0.1.0-nightly.60",
+    "@types/node": "22.19.0",
+    "@types/react": "19.3.0",
+    "expo-maps": "58.0.11",
+    "expo-sqlite": "58.0.15",
+    "react": "19.3.0",
+    "tsx": "4.20.6",
+    "typescript": "7.0.2"
+  }
+}

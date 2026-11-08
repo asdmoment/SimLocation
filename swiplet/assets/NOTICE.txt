@@ -1,0 +1,8 @@
+SimLocation swiplet. GPL-3.0-or-later: https://www.gnu.org/licenses/gpl-3.0.html
+
+src/coordinates.ts adapts the WGS-84 <-> Apple Maps (GCJ-02) conversion in
+simulate-location/src/coordinates.ts from https://github.com/swipt-automation/official-swiplets
+at commit c15eefc38bced2c3414cb584903328bd2bac5b19.
+Copyright (C) 2026 nekohasekai <i@sekai.icu>, GPL-3.0-or-later.
+
+SimLocation is an independent project, not made or endorsed by the authors of Swipt.
