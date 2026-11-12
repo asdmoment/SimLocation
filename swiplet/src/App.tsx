@@ -27,6 +27,8 @@ import { createStore, DATABASE, type Draft, type Favorite, type Request } from "
 const api = actions<typeof extension>();
 const store = createStore(openDatabaseSync(DATABASE, { enableChangeListener: true }));
 const CELLULAR = "shortcuts://run-shortcut?name=SimLocationCellular";
+// Surge's own URL scheme. Without Surge and its reflect module, Swipt cannot reach the phone.
+const SURGE = "surge:///start";
 const ZOOM = 15;
 
 type Mode = "point" | "route";
@@ -286,6 +288,7 @@ export default function App() {
                 {plan && plan.mode !== "clear" ? (
                   <Button label="恢复真实位置" systemImage="location.slash" role="destructive" onPress={restore} />
                 ) : null}
+                <Link label="启动 Surge" destination={SURGE} />
                 <Link label="蜂窝网络重连" destination={CELLULAR} />
               </Menu>
             </ToolbarItem>

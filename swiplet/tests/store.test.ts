@@ -70,6 +70,14 @@ test("favorites move to and from the web console's favorites.json", (t) => {
   assert.equal(b.favorites().length, 1);
 });
 
+test("a shortcut names the favorite it wants", (t) => {
+  const store = createStore(database(t)());
+  store.importFavorites(JSON.stringify([{ ...item(1), name: "默认位置" }, { ...item(2), name: "Twin" }, { ...item(3), name: "Twin" }]));
+  assert.deepEqual(store.favoritePoint(" 默认位置  "), { latitude: 0, longitude: 0.001 });
+  assert.throws(() => store.favoritePoint("Nowhere"), /没有名为「Nowhere」的收藏/);
+  assert.throws(() => store.favoritePoint("Twin"), /2 个收藏都叫「Twin」/);
+});
+
 test("a bad item or the limit rolls the whole import back", (t) => {
   const store = createStore(database(t)());
   assert.throws(() => store.importFavorites(JSON.stringify({ version: 1, items: [item(1), { ...item(2), lat: 100 }] })));

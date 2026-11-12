@@ -26,11 +26,13 @@ export interface Database {
 }
 
 const MALFORMED = "收藏应为 SimLocation 的 favorites.json。";
+// Names are saved, and looked up, with runs of whitespace collapsed.
+const cleanName = (name: unknown) => (typeof name === "string" ? name.split(/\s+/).filter(Boolean).join(" ") : "");
 
 export function checkFavorite(value: unknown): Favorite {
   const { id, name, lat, lon } = (value ?? {}) as Record<string, unknown>;
   if (typeof id !== "string" || !/^[0-9a-f]{12}$/.test(id)) throw new Error(MALFORMED);
-  const clean = typeof name === "string" ? name.split(/\s+/).filter(Boolean).join(" ") : "";
+  const clean = cleanName(name);
   if (!clean) throw new Error("请填写收藏名称。");
   if (clean.length > MAX_NAME) throw new Error(`名称最多 ${MAX_NAME} 个字符。`);
   if (/[\u0000-\u001f\u007f]/.test(clean)) throw new Error("名称包含不可显示的字符。");
@@ -100,6 +102,14 @@ export function createStore(db: Database) {
     },
     removeFavorite(id: string) {
       db.runSync("DELETE FROM favorites WHERE id = ?", id);
+    },
+    // Shortcuts name a favorite, so a name two favorites share is refused.
+    favoritePoint(name: string): Point {
+      const clean = cleanName(name);
+      const found = db.getAllSync<Favorite>("SELECT id, name, lat, lon FROM favorites WHERE name = ?", clean);
+      if (found.length === 0) throw new Error(`没有名为「${clean}」的收藏。`);
+      if (found.length > 1) throw new Error(`有 ${found.length} 个收藏都叫「${clean}」，删掉多余的再试。`);
+      return { latitude: found[0].lat, longitude: found[0].lon };
     },
     // Merges by id; one bad item rolls the whole import back.
     importFavorites(text: string): number {

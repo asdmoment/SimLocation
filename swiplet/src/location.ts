@@ -88,3 +88,36 @@ export async function probeConnection(
   }
   return { connected: false, error };
 }
+
+/**
+ * probeConnection, then `task` once Swipt reaches the phone, each within
+ * `budget` ms. A failed task is a result too: a shortcut runs this while
+ * cellular data is off and still has to turn it back on.
+ */
+export async function whenConnected(
+  info: (signal: AbortSignal) => Promise<unknown>,
+  task: (signal: AbortSignal) => Promise<void>,
+  signal: AbortSignal,
+  budget = 20_000,
+): Promise<Probe> {
+  const probe = await probeConnection(info, signal, budget);
+  if (!probe.connected) return probe;
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(budget)]);
+  let onAbort: () => void = () => {};
+  try {
+    deadline.throwIfAborted();
+    const ended = new Promise<never>((_, reject) => {
+      onAbort = () => reject(deadline.reason);
+      deadline.addEventListener("abort", onAbort, { once: true });
+    });
+    await Promise.race([Promise.resolve().then(() => {
+      deadline.throwIfAborted();
+      return task(deadline);
+    }), ended]);
+    return probe;
+  } catch (reason) {
+    return { connected: true, error: reason instanceof Error ? reason.message : String(reason) };
+  } finally {
+    deadline.removeEventListener("abort", onAbort);
+  }
+}

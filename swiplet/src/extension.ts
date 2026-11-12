@@ -1,9 +1,10 @@
 import { info, pasteboard, setPasteboard, simulatedLocation } from "@swipt/api/device";
 import { defineAction, defineExtension, type Schema } from "@swipt/api/swiplet";
 import { openDatabaseSync } from "expo-sqlite";
-import { probeConnection, serve, settle, type Probe, type SetLocation } from "./location";
+import { probeConnection, serve, settle, whenConnected, type Probe, type SetLocation } from "./location";
 import { checkPoint, checkRoute, MAX_POINTS, type Point, type RouteOptions } from "./route";
 import { createStore, DATABASE, type Plan, type Store } from "./store";
+import { runLocationShortcut, type ShortcutResult } from "./shortcut";
 
 let opened: Store | undefined;
 // Opened on first use: the build evaluates this module where there is no database.
@@ -55,6 +56,23 @@ const probe = schema<Probe>((value) => value as Probe, {
   properties: { connected: { type: "boolean" }, error: { type: ["string", "null"] } },
   required: ["connected", "error"],
 });
+const favorite = schema<{ name: string }>((value) => {
+  const name = (value as { name?: unknown } | null)?.name;
+  if (typeof name !== "string" || !name.trim()) throw new Error('需要 {"name": "收藏名称"}。');
+  return { name };
+}, { type: "object", properties: { name: { type: "string" } }, required: ["name"] });
+const shortcutInput = schema<{ mode: "favorite" | "clear"; name?: string; reconnect?: boolean }>((value) => {
+  const input = value as { mode?: unknown; name?: unknown; reconnect?: unknown } | null;
+  if (input?.mode !== "favorite" && input?.mode !== "clear") throw new Error("mode 必须是 favorite 或 clear。");
+  if (input.mode === "favorite" && (typeof input.name !== "string" || !input.name.trim())) throw new Error("请填写收藏名称。");
+  if (input.reconnect !== undefined && typeof input.reconnect !== "boolean") throw new Error("reconnect 必须是布尔值。");
+  return { mode: input.mode, name: typeof input.name === "string" ? input.name : undefined, reconnect: input.reconnect === true };
+}, {
+  type: "object", properties: { mode: { enum: ["favorite", "clear"] }, name: { type: "string" }, reconnect: { type: "boolean" } }, required: ["mode"],
+});
+const shortcutOutput = schema<ShortcutResult>((value) => value as ShortcutResult, {
+  type: "object", properties: { status: { enum: ["ok", "retry", "error"] }, message: { type: "string" } }, required: ["status", "message"],
+});
 const text = schema<string>((value) => {
   if (typeof value !== "string") throw new Error("需要一段文本。");
   return value;
@@ -91,6 +109,44 @@ export default defineExtension({
       input: point,
       expose: shortcuts,
       run: (point, { signal }) => apply({ mode: "point", point }, signal),
+    }),
+    // SimLocationCellular with this in place of each Check Cellular Connection
+    // goes straight to a favorite on cellular.
+    setFavorite: defineAction({
+      title: "Simulate Favorite",
+      description: "Waits up to 20 seconds for the phone, then simulates the favorite with this name.",
+      input: favorite,
+      output: probe,
+      expose: shortcuts,
+      run: ({ name }, { signal }) =>
+        whenConnected(
+          (signal) => info({ signal }),
+          (signal) => apply({ mode: "point", point: store().favoritePoint(name) }, signal),
+          signal,
+        ),
+    }),
+    locationShortcut: defineAction({
+      title: "Apply SimLocation Shortcut",
+      description: "Sets a favorite or restores real location using the current Wi-Fi or cellular connection; returns a status and a message.",
+      input: shortcutInput,
+      output: shortcutOutput,
+      expose: shortcuts,
+      async run({ mode, name, reconnect }, { signal }): Promise<ShortcutResult> {
+        // Invalid favorites must not trigger a cellular-data cycle.
+        let plan: Exclude<Plan, { mode: "route" }>;
+        try {
+          plan = mode === "clear" ? { mode: "clear" } : { mode: "point", point: store().favoritePoint(name!) };
+        } catch (reason) {
+          return { status: "error", message: `操作未完成：${reason instanceof Error ? reason.message : String(reason)}` };
+        }
+        return runLocationShortcut(
+          (signal) => info({ signal }),
+          (signal) => apply(plan, signal),
+          signal,
+          mode === "clear" ? "已恢复真实定位。" : `已设置${name === "默认位置" ? "默认位置" : `收藏「${name}」`}。`,
+          reconnect ? 20_000 : 4_000,
+        );
+      },
     }),
     startRoute: defineAction({
       title: "Play SimLocation Route",

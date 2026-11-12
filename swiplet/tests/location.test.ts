@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { probeConnection, serve, settle, type ServiceIO } from "../src/location";
+import { probeConnection, serve, settle, whenConnected, type ServiceIO } from "../src/location";
 import { distance, pairOf, type Point, type RouteOptions } from "../src/route";
 import type { Plan, Request } from "../src/store";
 
@@ -130,4 +130,23 @@ test("a probe cancelled beforehand makes no device call", async () => {
   }, controller.signal);
   assert.equal(called, false);
   assert.equal(result.connected, false);
+});
+
+test("a favorite is set only once the phone answers, and every failure is a result", async () => {
+  const signal = new AbortController().signal;
+  const sets: string[] = [];
+  const set = (name: string) => async () => void sets.push(name);
+  assert.deepEqual(await whenConnected(async () => {}, set("home"), signal), { connected: true, error: null });
+  assert.deepEqual(await whenConnected(() => Promise.reject(new Error("offline")), set("away"), signal, 10),
+    { connected: false, error: "offline" });
+  assert.deepEqual(sets, ["home"]);
+  assert.deepEqual(await whenConnected(async () => {}, () => Promise.reject(new Error("没有名为「x」的收藏。")), signal),
+    { connected: true, error: "没有名为「x」的收藏。" });
+});
+
+test("a set call that never answers ends with the budget", async () => {
+  const result = await whenConnected(async () => {}, (signal) => new Promise((_, reject) =>
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true })), new AbortController().signal, 10);
+  assert.equal(result.connected, true);
+  assert.notEqual(result.error, null);
 });
