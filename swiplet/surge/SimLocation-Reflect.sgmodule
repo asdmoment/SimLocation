@@ -1,0 +1,21 @@
+#!name=SimLocation Reflect
+#!desc=把 10.7.0.1 反射回本机，让 Swipt（SimLocation swiplet）、SideStore 这类 App 连上手机自己的开发者服务（49152）。Surge 要以增强模式（VIF）运行。
+#!system=ios
+#!requirement=CORE_VERSION>=6010000
+
+# 写法照 Surge 手册 IP Rewrite 一节的 On-Device Developer Services 示例：
+# https://manual.nssurge.com/features/ip-rewrite.html
+# IP Rewrite 从 Surge iOS 5.23.0（内核 6010000）开始提供。更早的版本没有 reflect，
+# 上面的 requirement 让它们把这个模块显示为不满足条件，而不是看似启用却不起作用。
+
+[General]
+# 手册原话：SideStore 找这条回环时会跳过带 IPv6 地址的 VPN 接口。disabled 本来就是默认值，
+# 写在这里是为了不受主配置影响。代价：Surge 不再接管直接连 IPv6 地址的原始 TCP 连接。
+ipv6-vif = disabled
+# 让发往 10.7.0.1 的包进入 Surge VIF，即使这个地址落在被排除的网段或本地网络的路由里。
+tun-included-routes = %INSERT% 10.7.0.1/32
+
+[IP Rewrite]
+# 在 IP 层把包的源地址和目的地址对调后送回发送方，早于 Surge 的 TCP/UDP 协议栈、规则和策略，
+# 也不会出现在请求列表里，所以不需要再配一条 DIRECT 规则。
+10.7.0.1 = reflect
