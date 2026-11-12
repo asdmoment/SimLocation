@@ -1,5 +1,10 @@
 # Foreground reflect relay
 
+> **Legacy since 2026-11-12.** The phones now simulate location on their own with the
+> SimLocation swiplet in Swipt; see [`swiplet/README.md`](../swiplet/README.md). This relay is
+> kept for reference and is no longer how the phones are used. Marking it legacy changed
+> nothing on the hosts: a relay deployed there stays as it was until `fleet.py relay-stop`.
+
 ## What is connected
 
 The existing CLI and password-protected web console remain the control surface.

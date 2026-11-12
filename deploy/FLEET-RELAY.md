@@ -1,5 +1,9 @@
 # 四节点中继（reflect relay fleet）
 
+> **Legacy（2026-11-12 起）。** 现在定位由手机上的 SimLocation swiplet 自己完成，见
+> [`swiplet/README.md`](../swiplet/README.md)。四节点中继不再是日常用法，这份文档只作参考保留。
+> 标为 legacy 没有改动主机：已部署的中继保持原状，要停用时用 `fleet.py relay-stop`。
+
 和 WireGuard 那套一样，四台主机（`fleet.json` 里的全部主机）各自独立地连手机：
 手机上的 a-Shell 同时开四条外层 mTLS 连接，每台主机用自己的 CA 和证书，任何一台
 掉线、证书出错或被停掉，都不影响另外三台。单台的原理、限制和排错见 `REFLECT.md`。

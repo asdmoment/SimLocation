@@ -380,7 +380,10 @@ simlocation doctor
   loopback 类型的新连接。可行的用法是连任意 Wi-Fi 时建立通道，再切到蜂窝保持；保持期间 WireGuard
   必须是活动 VPN，Surge 会被停用。
 
-### Surge reflect relay (foreground session)
+### Surge reflect relay (foreground session, legacy)
+
+Legacy since 2026-11-12: the phones use the on-device swiplet (`swiplet/`) instead. The
+description below is kept for reference.
 
 An alternative transport now connects the phone's a-Shell relay to the existing
 VPS console through mutual TLS. It keeps pairing keys on the VPS and supports
