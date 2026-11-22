@@ -1,6 +1,9 @@
 // WGS-84 <-> Apple Maps (GCJ-02) conversion, adapted from simulate-location/src/coordinates.ts
 // in https://github.com/swipt-automation/official-swiplets at c15eefc38bced2c3414cb584903328bd2bac5b19.
 // Copyright (C) 2026 nekohasekai <i@sekai.icu>, GPL-3.0-or-later. The package carries this in assets/NOTICE.txt.
+// Changed here: Hong Kong and Macau are their borders, in place of two rectangles that also held
+// Shekou, Gongbei and Hengqin and left out the north of the New Territories.
+import { REGIONS } from "./regions";
 import type { Point } from "./route";
 const axis = 6378245, eccentricity = 0.00669342162296594323;
 const shifted = [
@@ -12,10 +15,18 @@ const unshifted = [
   [25.398623, 119.921265, 21.785006, 122.497559], [22.284, 101.8652, 20.0988, 106.665],
   [21.5422, 106.4525, 20.4878, 108.051], [55.8175, 109.0323, 50.3257, 119.127],
   [55.8175, 127.4568, 49.5574, 137.0227], [44.8922, 131.2662, 42.5692, 137.0227],
-  [22.5, 113.8, 22.1, 114.45], [22.22, 113.52, 22.1, 113.6],
 ];
 const inside = (p: Point, [n, w, s, e]: number[]) => p.latitude <= n && p.latitude >= s && p.longitude >= w && p.longitude <= e;
-const needsShift = (p: Point) => shifted.some((b) => inside(p, b)) && !unshifted.some((b) => inside(p, b));
+const china = (p: Point) => shifted.some((b) => inside(p, b)) && !unshifted.some((b) => inside(p, b));
+function within(p: Point, ring: [number, number][]) {
+  let result = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [a, b] = ring[i], [c, d] = ring[j];
+    if ((a > p.latitude) !== (c > p.latitude) && p.longitude < b + (p.latitude - a) * (d - b) / (c - a)) result = !result;
+  }
+  return result;
+}
+const needsShift = (p: Point) => china(p) && !REGIONS.some((ring) => within(p, ring));
 function shift(p: Point): Point {
   const x = p.longitude - 105, y = p.latitude - 35, pi = Math.PI;
   const wave = (20 * Math.sin(6 * x * pi) + 20 * Math.sin(2 * x * pi)) * 2 / 3;
@@ -32,12 +43,18 @@ function shift(p: Point): Point {
   };
 }
 export const toMap = (p: Point): Point => needsShift(p) ? shift(p) : p;
-export function toGPS(p: Point): Point {
-  if (!needsShift(p)) return p;
+function unshift(p: Point): Point {
   let gps = p;
   for (let i = 0; i < 8; i++) {
     const moved = shift(gps);
     gps = { latitude: gps.latitude + p.latitude - moved.latitude, longitude: gps.longitude + p.longitude - moved.longitude };
   }
   return gps;
+}
+// The shift carries the mainland's edge up to 600 m over the border, so a map
+// point there can stand for either side. The mainland, built up to the line, wins.
+export function toGPS(p: Point): Point {
+  if (!china(p)) return p;
+  const gps = unshift(p);
+  return needsShift(gps) || needsShift(p) ? gps : p;
 }

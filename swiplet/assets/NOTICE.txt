@@ -6,3 +6,8 @@ at commit c15eefc38bced2c3414cb584903328bd2bac5b19.
 Copyright (C) 2026 nekohasekai <i@sekai.icu>, GPL-3.0-or-later.
 
 SimLocation is an independent project, not made or endorsed by the authors of Swipt.
+
+The borders of Hong Kong and Macau (src/regions.ts) are simplified from
+OpenStreetMap relations 913110 and 1867188.
+(C) OpenStreetMap contributors, Open Database License 1.0,
+https://www.openstreetmap.org/copyright

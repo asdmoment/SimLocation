@@ -22,7 +22,7 @@ npm run build   # 输出 dist/simlocation.swiplet
 - Swipt 有定位权限时，地图上的蓝点就是 iOS 实际报告的位置，能直接看出模拟有没有生效；没有权限时地图从全球视图开始，用搜索、坐标或收藏跳过去。
 - 收藏夹和网页控制台的 `var/favorites.json` 格式相同，可以经剪贴板双向导入，按 id 合并，最多 200 个。
 - 路线导入格式与 CLI 相同：`[[lat, lon], ...]`、`{"points": [...]}` 或只含一条 track segment / route 的 GPX，最多 10000 个点、4 MiB。
-- 中国大陆的 Apple 地图是 GCJ-02 坐标，图钉和途经点在提交时换算成 WGS-84；港澳不换算。
+- 中国大陆的 Apple 地图是 GCJ-02 坐标，图钉和途经点在提交时换算成 WGS-84；港澳按实际边界排除（0.5.0 以前是两个矩形，蛇口、拱北、横琴口岸会偏约 600 米）。紧贴边界约 600 米内，地图上同一点可能对应两侧，反算时按内地处理；从收藏或输入坐标选的点原样提交，不受影响。边界分类尚未逐点在真机上核对。
 - 输入的坐标按 WGS-84 处理。从高德、腾讯地图复制的数字是 GCJ-02，照样输入会偏几百米；输入后看一眼图钉是否落在想要的位置。
 
 ## 工作方式
@@ -121,4 +121,4 @@ npm run build
 
 需要 Node.js 22.13 以上。`src/route.ts` 是从 `bin/simlocation.py` 移植的路线算法和导入格式；`src/location.ts` 是 action 和服务对设备做的事，测试里用假实现驱动；`src/store.ts` 是共享数据库；`src/extension.ts` 和 `src/App.tsx` 只负责接到 Swipt。构建目标是 `@swipt/api` / `@swipt/cli` `0.1.0-nightly.60`。
 
-`src/coordinates.ts` 的坐标换算改编自 [official-swiplets](https://github.com/swipt-automation/official-swiplets) 的 simulate-location（`c15eefc`，© 2026 nekohasekai，GPL-3.0-or-later），声明随包放在 `assets/NOTICE.txt`。
+`src/coordinates.ts` 的坐标换算改编自 [official-swiplets](https://github.com/swipt-automation/official-swiplets) 的 simulate-location（`c15eefc`，© 2026 nekohasekai，GPL-3.0-or-later），声明随包放在 `assets/NOTICE.txt`。港澳边界 `src/regions.ts` 简化自 OpenStreetMap（ODbL 1.0），声明也在同一文件里。

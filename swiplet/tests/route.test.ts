@@ -130,6 +130,35 @@ test("route requests are validated before they replace anything, with the CLI's 
   assert.deepEqual(checkRoute({ points: options.points }), options);
 });
 
+test("the mainland side of the Hong Kong and Macau borders is converted, and round-trips", () => {
+  // Public landmarks from OpenStreetMap.
+  for (const [latitude, longitude] of [
+    [22.4883612, 113.9104918], // Sea World
+    [22.4797136, 113.9073872], // Shekou port
+    [22.2185803, 113.5489252], // Gongbei port
+    [22.1405453, 113.5429628], // Hengqin port
+    [22.532, 114.1135], // Luohu port
+    [22.5463725, 114.0545223], // Shenzhen civic centre
+  ]) {
+    const p = { latitude, longitude }, map = toMap(p);
+    const moved = distance([latitude, longitude], [map.latitude, map.longitude]);
+    assert.ok(moved > 500 && moved < 700, `${latitude}, ${longitude}: ${moved} m`);
+    const gps = toGPS(map);
+    near(gps.latitude, latitude, 1e-8);
+    near(gps.longitude, longitude, 1e-8);
+  }
+  for (const [latitude, longitude] of [
+    [22.2853006, 114.1592777], // IFC
+    [22.501, 114.128], // Sheung Shui, north of the old rectangle
+    [22.197457, 113.5408602], // St Paul's
+    [22.148, 113.564], // Cotai
+  ]) {
+    const p = { latitude, longitude };
+    assert.deepEqual(toMap(p), p);
+    assert.deepEqual(toGPS(p), p);
+  }
+});
+
 test("Apple map coordinates round-trip, with Hong Kong and Macau unchanged", () => {
   const beijing = { latitude: 39.9, longitude: 116.4 };
   const map = toMap(beijing);
