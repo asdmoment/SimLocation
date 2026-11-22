@@ -152,6 +152,7 @@ test("the mainland side of the Hong Kong and Macau borders is converted, and rou
     [22.501, 114.128], // Sheung Shui, north of the old rectangle
     [22.197457, 113.5408602], // St Paul's
     [22.148, 113.564], // Cotai
+    [22.129, 113.544], // University of Macau, on Hengqin
   ]) {
     const p = { latitude, longitude };
     assert.deepEqual(toMap(p), p);

@@ -52,9 +52,10 @@ function unshift(p: Point): Point {
   return gps;
 }
 // The shift carries the mainland's edge up to 600 m over the border, so a map
-// point there can stand for either side. The mainland, built up to the line, wins.
+// point there can stand for either side. The mainland, built up to the line, wins,
+// except in Macau's areas on Hengqin, which that overlap would cover whole.
 export function toGPS(p: Point): Point {
-  if (!china(p)) return p;
+  if (!china(p) || REGIONS.slice(2).some((ring) => within(p, ring))) return p;
   const gps = unshift(p);
   return needsShift(gps) || needsShift(p) ? gps : p;
 }
