@@ -1,7 +1,7 @@
 // What the extension does with the phone, kept apart from the Swipt modules so
 // it can be tested with fakes.
-import { Playback, type Point } from "./route";
-import type { Request } from "./store";
+import { distance, pairOf, Playback, type Point } from "./route";
+import type { Plan, Request } from "./store";
 
 export type SetLocation = (point: Point | null, signal: AbortSignal) => Promise<void>;
 
@@ -18,10 +18,40 @@ export async function settle(request: Request, latest: () => Request | null, set
   }
 }
 
+export interface ApplyIO {
+  submit(plan: Plan): number;
+  latest(): Request | null;
+  set: SetLocation;
+  settled(): void;
+}
+
+/**
+ * Submits a point or clear and settles it. The request is written before the
+ * phone is asked, so it never says what is in effect: `settled` tells the
+ * interface to read that from Swipt again, also after a failure.
+ */
+export async function apply(plan: Exclude<Plan, { mode: "route" }>, io: ApplyIO, signal: AbortSignal) {
+  const id = io.submit(plan);
+  try {
+    await settle({ id, created: Date.now(), plan }, io.latest, io.set, signal);
+  } finally {
+    io.settled();
+  }
+}
+
+/** What Swipt holds: a point, null for the real location, undefined until it has been read. */
+export type Held = Point | null | undefined;
+
+export const holds = (held: Held, point: Point | null) =>
+  !!held && !!point && distance(pairOf(held), pairOf(point)) < 1;
+// Not knowing must not take the way back to the real location away.
+export const restorable = (held: Held, moving: boolean) => moving || held !== null;
+
 export interface ServiceIO {
   latestId(): number;
   latest(): Request | null;
   set: SetLocation;
+  settled(): void;
   now(): number;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
 }
@@ -45,7 +75,10 @@ export async function serve(io: ServiceIO, signal: AbortSignal): Promise<never> 
         // Point and clear requests set the location themselves. One that ends
         // a route is set again here, in case our last update landed after it.
         // One found at startup is left alone: Swipt restores the location.
-        if (route && request) await settle(request, io.latest, io.set, signal);
+        if (route && request) {
+          await settle(request, io.latest, io.set, signal);
+          io.settled();
+        }
         route = undefined;
         continue;
       }
@@ -54,6 +87,7 @@ export async function serve(io: ServiceIO, signal: AbortSignal): Promise<never> 
       const sample = route.playback.sample((io.now() - route.started) / 1000);
       await io.set(sample.point, signal);
       route.done = sample.completed;
+      if (route.done) io.settled();
     }
     await io.sleep(1000, signal);
   }

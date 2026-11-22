@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { probeConnection, serve, settle, whenConnected, type ServiceIO } from "../src/location";
+import { apply, holds, probeConnection, restorable, serve, settle, whenConnected, type ServiceIO } from "../src/location";
 import { distance, pairOf, type Point, type RouteOptions } from "../src/route";
 import type { Plan, Request } from "../src/store";
 
@@ -18,6 +18,7 @@ async function service(initial: Request[], ticks: number, between?: (tick: numbe
   const controller = new AbortController();
   let clock = 0, tick = 0;
   const io: ServiceIO = {
+    settled() {},
     latestId: () => rows.at(-1)?.id ?? 0,
     latest: () => rows.at(-1) ?? null,
     async set(point) {
@@ -75,6 +76,7 @@ test("a newer route starts from its own beginning", async () => {
 test("a failed set call ends the service, for Swipt to restart once the phone is back", async () => {
   const failure = Object.assign(new Error("the device is unavailable"), { name: "UnavailableError" });
   const io: ServiceIO = {
+    settled() {},
     latestId: () => 1,
     latest: () => playing,
     set: () => Promise.reject(failure),
@@ -149,4 +151,38 @@ test("a set call that never answers ends with the budget", async () => {
     signal.addEventListener("abort", () => reject(signal.reason), { once: true })), new AbortController().signal, 10);
   assert.equal(result.connected, true);
   assert.notEqual(result.error, null);
+});
+
+test("a failed point or clear leaves the interface on what Swipt still holds", async () => {
+  const B = { latitude: 3, longitude: 4 };
+  for (const [before, plan] of [
+    [null, { mode: "point", point: A }],
+    [A, { mode: "clear" }],
+    [A, { mode: "point", point: B }],
+  ] satisfies [Point | null, Plan][]) {
+    let held: Point | null = before, read: Point | null | undefined;
+    const rows: Request[] = [];
+    await assert.rejects(apply(plan, {
+      submit: (plan) => rows.push({ id: rows.length + 1, created: 0, plan }),
+      latest: () => rows.at(-1) ?? null,
+      set: () => Promise.reject(new Error("offline")),
+      settled: () => void (read = held),
+    }, new AbortController().signal), /offline/);
+    assert.deepEqual(rows[0].plan, plan); // still submitted first, for the ordering
+    assert.deepEqual(read, before);
+    if (plan.mode === "point") assert.equal(holds(read, plan.point), false);
+    assert.equal(restorable(read, false), before !== null);
+  }
+});
+
+test("success is read only after the phone has the location", async () => {
+  let held: Point | null = null, read: Point | null = null;
+  await apply({ mode: "point", point: A }, {
+    submit: () => 1,
+    latest: () => null,
+    set: async (point) => void (held = point),
+    settled: () => void (read = held),
+  }, new AbortController().signal);
+  assert.equal(holds(read, A), true);
+  assert.equal(restorable(undefined, false), true); // unknown keeps the way back
 });

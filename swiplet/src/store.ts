@@ -94,6 +94,12 @@ export function createStore(db: Database) {
       db.runSync("INSERT OR REPLACE INTO state (key, value) VALUES ('draft', ?)", JSON.stringify(draft));
     },
 
+    // Changes whenever a device call ends, for the interface to read the location again.
+    markSettled() {
+      db.runSync("INSERT OR REPLACE INTO state (key, value) VALUES ('settled', ?)", JSON.stringify(favoriteId()));
+    },
+    settled: () => read("settled"),
+
     favorites,
     addFavorite(name: string, point: Point) {
       const same = favorites().find((f) => Math.abs(f.lat - point.latitude) < 1e-6 && Math.abs(f.lon - point.longitude) < 1e-6);

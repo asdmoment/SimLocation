@@ -13,11 +13,13 @@ import { actions, exit, useService } from "@swipt/api/swiplet";
 import { AppleMaps } from "expo-maps";
 import { addDatabaseChangeListener, openDatabaseSync } from "expo-sqlite";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AppState } from "react-native";
 
 import { toGPS, toMap } from "./coordinates";
 import type extension from "./extension";
+import { holds, restorable, type Held } from "./location";
 import {
-  checkRoute, distance, MAX_POINTS, pairOf, parseCoordinate, parseRoute, Playback, pointOf, Route,
+  checkRoute, MAX_POINTS, pairOf, parseCoordinate, parseRoute, Playback, pointOf, Route,
   type Pair, type Point,
 } from "./route";
 import { createStore, DATABASE, type Draft, type Favorite, type Request } from "./store";
@@ -78,10 +80,12 @@ export default function App() {
   const service = useService<typeof extension>();
   const map = useRef<AppleMaps.MapView>(null);
   const [request, setRequest] = useState(store.latest);
+  const [held, setHeld] = useState<Held>(undefined);
   const [draft, setDraft] = useState(store.draft);
   const [favorites, setFavorites] = useState(store.favorites);
   const [mode, setMode] = useState<Mode>(request?.plan.mode === "route" ? "route" : "point");
-  const [pin, setPin] = useState(() => (request?.plan.mode === "point" ? toMap(request.plan.point) : null));
+  // WGS-84, so a favorite or typed coordinate is submitted exactly as given.
+  const [target, setTarget] = useState(() => (request?.plan.mode === "point" ? request.plan.point : null));
   const [sheet, setSheet] = useState<Sheet>("search");
   const [sheetShown, setSheetShown] = useState(false);
   const [entering, setEntering] = useState(false);
@@ -108,13 +112,45 @@ export default function App() {
     }
   }, [draft.points, draft.loop]);
 
-  // Requests also come from Shortcuts and the service.
+  // A request is only what was asked; what is in effect is what Swipt holds.
+  // Read again whenever a device call, here, in Shortcuts or in the service, ends.
   useEffect(() => {
-    const subscription = addDatabaseChangeListener(({ tableName }) => {
+    let reads = 0, first = true, settled = store.settled();
+    const refresh = () => {
+      const read = ++reads;
+      api.heldLocation().then((value) => {
+        if (read !== reads) return;
+        setHeld(value);
+        if (first && value && !camera) {
+          setTarget((current) => current ?? value);
+          map.current?.setCameraPosition({ coordinates: toMap(value), zoom: ZOOM }).catch(reportError);
+        }
+        first = false;
+      }, (error: unknown) => {
+        if (read !== reads) return;
+        setHeld(undefined);
+        reportError(error);
+      });
+    };
+    refresh();
+    const database = addDatabaseChangeListener(({ tableName }) => {
       if (tableName === "requests") setRequest(store.latest());
+      if (tableName !== "state") return; // which also holds the draft
+      const latest = store.settled();
+      if (latest !== settled) {
+        settled = latest;
+        refresh();
+      }
     });
-    return () => subscription.remove();
-  }, []);
+    const foreground = AppState.addEventListener("change", (state) => {
+      if (state === "active") refresh();
+    });
+    return () => {
+      reads++;
+      database.remove();
+      foreground.remove();
+    };
+  }, [camera]);
   useEffect(() => attempt(() => store.saveDraft(draft)), [draft]);
   useEffect(() => {
     if (!camera) map.current?.setCameraPosition().catch(reportError);
@@ -128,12 +164,15 @@ export default function App() {
   // A map tap, a search result, typed coordinates or a favorite: it moves
   // the pin, or extends the route.
   const choose = (location: Point) => {
-    if (mode === "point") setPin(location);
-    else setDraft((d) => (d.points.length < MAX_POINTS ? { ...d, points: [...d.points, pairOf(toGPS(location))] } : d));
+    if (mode === "point") setTarget(toGPS(location));
+    else addStop(toGPS(location));
   };
-  const reveal = (location: Point) => {
-    choose(location);
-    map.current?.setCameraPosition({ coordinates: location, zoom: ZOOM }).catch(reportError);
+  const addStop = (gps: Point) =>
+    setDraft((d) => (d.points.length < MAX_POINTS ? { ...d, points: [...d.points, pairOf(gps)] } : d));
+  const reveal = (gps: Point) => {
+    if (mode === "point") setTarget(gps);
+    else addStop(gps);
+    map.current?.setCameraPosition({ coordinates: toMap(gps), zoom: ZOOM }).catch(reportError);
   };
   const show = (kind: Sheet) => {
     setSheet(kind);
@@ -141,9 +180,8 @@ export default function App() {
   };
   const restore = () => run(() => api.clear());
 
-  const plan = request?.plan;
-  const target = pin && toGPS(pin);
-  const here = !!target && plan?.mode === "point" && distance(pairOf(target), pairOf(plan.point)) < 1;
+  const pin = target && toMap(target);
+  const here = !moving && holds(held, target);
   const entered = parseCoordinate(entry);
 
   let primary: { label: string; press(): void; stop?: boolean; off?: boolean };
@@ -160,7 +198,7 @@ export default function App() {
         stop: true,
         press() {
           const point = sample!.point;
-          setPin(toMap(point));
+          setTarget(point);
           run(() => api.setPoint(point));
         },
       }
@@ -214,7 +252,7 @@ export default function App() {
                       <SearchPlaces
                         onChoose={(location) => {
                           setSheetShown(false);
-                          reveal(location);
+                          reveal(toGPS(location));
                         }}
                       />
                     ) : sheet === "favorites" ? (
@@ -223,7 +261,7 @@ export default function App() {
                         pin={target}
                         onChoose={(item) => {
                           setSheetShown(false);
-                          reveal(toMap({ latitude: item.lat, longitude: item.lon }));
+                          reveal({ latitude: item.lat, longitude: item.lon });
                         }}
                         onChange={() => setFavorites(store.favorites())}
                       />
@@ -249,7 +287,7 @@ export default function App() {
                 modifiers={[keyboardType("numbers-and-punctuation")]}
               />
               <Button label="取消" role="cancel" onPress={() => {}} />
-              <Button label="完成" onPress={() => entered && reveal(toMap(entered))} modifiers={[disabled(!entered)]} />
+              <Button label="完成" onPress={() => entered && reveal(entered)} modifiers={[disabled(!entered)]} />
             </Alert.Actions>
           </Alert>
           <Toolbar.Content>
@@ -285,7 +323,7 @@ export default function App() {
                 {mode === "route" ? (
                   <Button label="路线设置" systemImage="slider.horizontal.3" onPress={() => show("route")} />
                 ) : null}
-                {plan && plan.mode !== "clear" ? (
+                {restorable(held, moving) ? (
                   <Button label="恢复真实位置" systemImage="location.slash" role="destructive" onPress={restore} />
                 ) : null}
                 <Link label="启动 Surge" destination={SURGE} />

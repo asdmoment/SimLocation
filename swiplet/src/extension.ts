@@ -1,7 +1,7 @@
 import { info, pasteboard, setPasteboard, simulatedLocation } from "@swipt/api/device";
 import { defineAction, defineExtension, type Schema } from "@swipt/api/swiplet";
 import { openDatabaseSync } from "expo-sqlite";
-import { probeConnection, serve, settle, whenConnected, type Probe, type SetLocation } from "./location";
+import { apply, probeConnection, serve, whenConnected, type Probe, type SetLocation } from "./location";
 import { checkPoint, checkRoute, MAX_POINTS, type Point, type RouteOptions } from "./route";
 import { createStore, DATABASE, type Plan, type Store } from "./store";
 import { runLocationShortcut, type ShortcutResult } from "./shortcut";
@@ -80,10 +80,13 @@ const text = schema<string>((value) => {
 
 // Point and clear take effect right away, without the service: Swipt keeps
 // the location and sets it again after a reconnect or its own restart.
-async function apply(plan: Exclude<Plan, { mode: "route" }>, signal: AbortSignal) {
-  const id = store().submit(plan);
-  await settle({ id, created: Date.now(), plan }, () => store().latest(), set, signal);
-}
+const applyPlan = (plan: Exclude<Plan, { mode: "route" }>, signal: AbortSignal) =>
+  apply(plan, {
+    submit: (plan) => store().submit(plan),
+    latest: () => store().latest(),
+    set,
+    settled: () => store().markSettled(),
+  }, signal);
 
 const shortcuts = ["shortcuts"] as const;
 
@@ -93,6 +96,7 @@ export default defineExtension({
       latestId: () => store().latestId(),
       latest: () => store().latest(),
       set,
+      settled: () => store().markSettled(),
       now: Date.now,
       sleep: (ms, signal) => sleep(ms, { signal }),
     }, signal),
@@ -108,7 +112,7 @@ export default defineExtension({
       title: "Set Simulated Location",
       input: point,
       expose: shortcuts,
-      run: (point, { signal }) => apply({ mode: "point", point }, signal),
+      run: (point, { signal }) => applyPlan({ mode: "point", point }, signal),
     }),
     // SimLocationCellular with this in place of each Check Cellular Connection
     // goes straight to a favorite on cellular.
@@ -121,7 +125,7 @@ export default defineExtension({
       run: ({ name }, { signal }) =>
         whenConnected(
           (signal) => info({ signal }),
-          (signal) => apply({ mode: "point", point: store().favoritePoint(name) }, signal),
+          (signal) => applyPlan({ mode: "point", point: store().favoritePoint(name) }, signal),
           signal,
         ),
     }),
@@ -141,7 +145,7 @@ export default defineExtension({
         }
         return runLocationShortcut(
           (signal) => info({ signal }),
-          (signal) => apply(plan, signal),
+          (signal) => applyPlan(plan, signal),
           signal,
           mode === "clear" ? "已恢复真实定位。" : `已设置${name === "默认位置" ? "默认位置" : `收藏「${name}」`}。`,
           reconnect ? 20_000 : 4_000,
@@ -160,7 +164,12 @@ export default defineExtension({
     clear: defineAction({
       title: "Restore Real Location",
       expose: shortcuts,
-      run: (_, { signal }) => apply({ mode: "clear" }, signal),
+      run: (_, { signal }) => applyPlan({ mode: "clear" }, signal),
+    }),
+    // The interface cannot import the device module. Not for Shortcuts.
+    heldLocation: defineAction({
+      title: "Read Simulated Location",
+      run: (_, { signal }) => simulatedLocation.get({ signal }),
     }),
     // The interface has no pasteboard of its own.
     readClipboard: defineAction({
