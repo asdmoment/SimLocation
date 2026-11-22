@@ -22,7 +22,17 @@ export interface ApplyIO {
   submit(plan: Plan): number;
   latest(): Request | null;
   set: SetLocation;
+  record(point: Point): void;
   settled(): void;
+}
+
+// Bookkeeping cannot fail what the phone did: a shortcut answers a failure by cycling cellular data.
+function note(task: () => void) {
+  try {
+    task();
+  } catch (error) {
+    console.warn(error);
+  }
 }
 
 /**
@@ -34,8 +44,9 @@ export async function apply(plan: Exclude<Plan, { mode: "route" }>, io: ApplyIO,
   const id = io.submit(plan);
   try {
     await settle({ id, created: Date.now(), plan }, io.latest, io.set, signal);
+    if (plan.mode === "point") note(() => io.record(plan.point));
   } finally {
-    io.settled();
+    note(() => io.settled());
   }
 }
 
@@ -77,7 +88,7 @@ export async function serve(io: ServiceIO, signal: AbortSignal): Promise<never> 
         // One found at startup is left alone: Swipt restores the location.
         if (route && request) {
           await settle(request, io.latest, io.set, signal);
-          io.settled();
+          note(() => io.settled());
         }
         route = undefined;
         continue;
@@ -87,7 +98,7 @@ export async function serve(io: ServiceIO, signal: AbortSignal): Promise<never> 
       const sample = route.playback.sample((io.now() - route.started) / 1000);
       await io.set(sample.point, signal);
       route.done = sample.completed;
-      if (route.done) io.settled();
+      if (route.done) note(() => io.settled());
     }
     await io.sleep(1000, signal);
   }

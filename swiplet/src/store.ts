@@ -1,9 +1,10 @@
 // The database the interface, the actions and the service share. Swipt sends
 // writes from a connection opened with enableChangeListener to the interface.
-import { checkPoint, isPair, MAX_POINTS, type Pair, type Point, type RouteOptions } from "./route";
+import { checkPoint, distance, isPair, MAX_POINTS, pairOf, pointOf, type Pair, type Point, type RouteOptions } from "./route";
 
 export const DATABASE = "simlocation.db";
 export const MAX_FAVORITES = 200; // the web console's limits, so favorites.json moves both ways
+export const MAX_RECENT = 10;
 const MAX_NAME = 60;
 
 export type Plan =
@@ -55,6 +56,10 @@ export function createStore(db: Database) {
     return row && JSON.parse(row.value);
   };
   const favorites = () => db.getAllSync<Favorite>("SELECT id, name, lat, lon FROM favorites ORDER BY name, id");
+  const recent = (): Point[] => {
+    const saved = read("recent");
+    return Array.isArray(saved) ? saved.filter(isPair).slice(0, MAX_RECENT).map(pointOf) : [];
+  };
   const saveFavorite = (value: unknown) => {
     const item = checkFavorite(value);
     const exists = db.getFirstSync("SELECT 1 FROM favorites WHERE id = ?", item.id);
@@ -99,6 +104,14 @@ export function createStore(db: Database) {
       db.runSync("INSERT OR REPLACE INTO state (key, value) VALUES ('settled', ?)", JSON.stringify(favoriteId()));
     },
     settled: () => read("settled"),
+
+    // Points that were set successfully, the newest first.
+    recent,
+    recordRecent(point: Point) {
+      const others = recent().filter((p) => distance(pairOf(p), pairOf(point)) >= 1);
+      const saved = [point, ...others].slice(0, MAX_RECENT).map(pairOf);
+      db.runSync("INSERT OR REPLACE INTO state (key, value) VALUES ('recent', ?)", JSON.stringify(saved));
+    },
 
     favorites,
     addFavorite(name: string, point: Point) {

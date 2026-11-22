@@ -163,6 +163,7 @@ test("a failed point or clear leaves the interface on what Swipt still holds", a
     let held: Point | null = before, read: Point | null | undefined;
     const rows: Request[] = [];
     await assert.rejects(apply(plan, {
+      record: () => assert.fail("a failure was recorded"),
       submit: (plan) => rows.push({ id: rows.length + 1, created: 0, plan }),
       latest: () => rows.at(-1) ?? null,
       set: () => Promise.reject(new Error("offline")),
@@ -178,6 +179,7 @@ test("a failed point or clear leaves the interface on what Swipt still holds", a
 test("success is read only after the phone has the location", async () => {
   let held: Point | null = null, read: Point | null = null;
   await apply({ mode: "point", point: A }, {
+    record() {},
     submit: () => 1,
     latest: () => null,
     set: async (point) => void (held = point),
@@ -185,4 +187,18 @@ test("success is read only after the phone has the location", async () => {
   }, new AbortController().signal);
   assert.equal(holds(read, A), true);
   assert.equal(restorable(undefined, false), true); // unknown keeps the way back
+});
+
+test("bookkeeping that fails does not turn a success into a retry", async () => {
+  await apply({ mode: "point", point: A }, {
+    submit: () => 1,
+    latest: () => null,
+    set: async () => {},
+    record: () => {
+      throw new Error("database is locked");
+    },
+    settled: () => {
+      throw new Error("database is locked");
+    },
+  }, new AbortController().signal);
 });

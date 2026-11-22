@@ -36,7 +36,7 @@ const SURGE = "surge:///start";
 const ZOOM = 15;
 
 type Mode = "point" | "route";
-type Sheet = "search" | "favorites" | "route";
+type Sheet = "search" | "recent" | "favorites" | "route";
 
 const format = ({ latitude, longitude }: Point) => `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
 const meters = (m: number) => (m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(2)} km`);
@@ -96,6 +96,7 @@ export default function App() {
   const [held, setHeld] = useState<Held>(undefined);
   const [draft, setDraft] = useState(store.draft);
   const [favorites, setFavorites] = useState(store.favorites);
+  const [recent, setRecent] = useState(store.recent);
   const [mode, setMode] = useState<Mode>(request?.plan.mode === "route" ? "route" : "point");
   // WGS-84, so a favorite or typed coordinate is submitted exactly as given.
   const [target, setTarget] = useState(() => (request?.plan.mode === "point" ? request.plan.point : null));
@@ -162,6 +163,7 @@ export default function App() {
       const latest = store.settled();
       if (latest !== settled) {
         settled = latest;
+        setRecent(store.recent());
         refresh();
       }
     });
@@ -302,6 +304,15 @@ export default function App() {
                           reveal(toGPS(location));
                         }}
                       />
+                    ) : sheet === "recent" ? (
+                      <Recent
+                        items={recent}
+                        favorites={favorites}
+                        onChoose={(point) => {
+                          setSheetShown(false);
+                          reveal(point);
+                        }}
+                      />
                     ) : sheet === "favorites" ? (
                       <Favorites
                         items={favorites}
@@ -359,6 +370,7 @@ export default function App() {
                   }}
                 />
                 <Button label="粘贴地图链接" systemImage="link" onPress={() => open(clipboard)} />
+                <Button label="最近使用" systemImage="clock" onPress={() => show("recent")} />
                 <Button label="收藏夹" systemImage="star" onPress={() => show("favorites")} />
                 {mode === "route" ? (
                   <Button
@@ -447,6 +459,28 @@ function SearchPlaces({ onChoose }: { onChoose(location: Point): void }) {
             </VStack>
           </Button>
         ))}
+      </List>
+    </NavigationStack>
+  );
+}
+
+function Recent({ items, favorites, onChoose }: { items: Point[]; favorites: Favorite[]; onChoose(point: Point): void }) {
+  return (
+    <NavigationStack>
+      <List modifiers={[navigationTitle("最近使用"), navigationBarTitleDisplayMode("inline")]}>
+        <Section footer={<Text>只记设置成功的定点，最多 10 个。</Text>}>
+          {items.length ? items.map((point, index) => {
+            const name = favorites.find((f) => holds(point, { latitude: f.lat, longitude: f.lon }))?.name;
+            return (
+              <Button key={index} onPress={() => onChoose(point)} modifiers={[buttonStyle("plain")]}>
+                <VStack alignment="leading">
+                  <Text>{name ?? format(point)}</Text>
+                  {name ? <Text modifiers={[...secondary, monospacedDigit()]}>{format(point)}</Text> : null}
+                </VStack>
+              </Button>
+            );
+          }) : <Text modifiers={secondary}>还没有记录。</Text>}
+        </Section>
       </List>
     </NavigationStack>
   );

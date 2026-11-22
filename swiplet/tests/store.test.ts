@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createStore, MAX_FAVORITES } from "../src/store";
+import { createStore, MAX_FAVORITES, MAX_RECENT } from "../src/store";
 import { open } from "./sqlite";
 
 // Each call opens another connection to one temporary database, the way the
@@ -99,4 +99,13 @@ test("favorites saved by the first version get ids the web console accepts", (t)
   const favorites = createStore(raw).favorites();
   assert.match(favorites.find((f) => f.name === "Old")!.id, /^[0-9a-f]{12}$/);
   assert.equal(favorites.find((f) => f.name === "Kept")!.id, "00000000000a");
+});
+
+test("recent points are newest first, without repeats, and capped", (t) => {
+  const store = createStore(database(t)());
+  assert.deepEqual(store.recent(), []);
+  for (let n = 0; n <= MAX_RECENT; n++) store.recordRecent({ latitude: n, longitude: 0 });
+  assert.equal(store.recent().length, MAX_RECENT);
+  store.recordRecent({ latitude: 5, longitude: 0 });
+  assert.deepEqual(store.recent().map((p) => p.latitude), [5, 10, 9, 8, 7, 6, 4, 3, 2, 1]);
 });

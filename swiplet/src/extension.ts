@@ -85,6 +85,7 @@ const applyPlan = (plan: Exclude<Plan, { mode: "route" }>, signal: AbortSignal) 
     submit: (plan) => store().submit(plan),
     latest: () => store().latest(),
     set,
+    record: (point) => store().recordRecent(point),
     settled: () => store().markSettled(),
   }, signal);
 
