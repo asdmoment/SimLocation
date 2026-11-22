@@ -13,11 +13,12 @@ import { actions, exit, useService } from "@swipt/api/swiplet";
 import { AppleMaps } from "expo-maps";
 import { addDatabaseChangeListener, openDatabaseSync } from "expo-sqlite";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AppState } from "react-native";
+import { AppState, SafeAreaView, StyleSheet, View } from "react-native";
 
 import { toGPS, toMap } from "./coordinates";
 import type extension from "./extension";
 import { holds, restorable, type Held } from "./location";
+import { Centre, PICK_ZOOM, type Camera } from "./picker";
 import {
   checkRoute, MAX_POINTS, pairOf, parseCoordinate, parseRoute, Playback, pointOf, Route,
   type Pair, type Point,
@@ -91,6 +92,8 @@ export default function App() {
   const [entering, setEntering] = useState(false);
   const [entry, setEntry] = useState("");
   const [now, setNow] = useState(Date.now);
+  const [close, setClose] = useState(false); // near enough for the crosshair to pick
+  const zoom = useRef(ZOOM);
 
   // The interface computes a route's position the way the service does.
   const playback = useMemo(() => playbackOf(request), [request]);
@@ -102,6 +105,11 @@ export default function App() {
       : sample ? sample.point
       : draft.points.length ? pointOf(draft.points[0]) : null;
     return gps ? { coordinates: toMap(gps), zoom: ZOOM } : undefined;
+  });
+  const [centre] = useState(() => {
+    const value = new Centre();
+    if (camera) value.aimAt(camera.coordinates, Date.now());
+    return value;
   });
   const path = useMemo(() => draft.points.map((p) => toMap(pointOf(p))), [draft.points]);
   const total = useMemo(() => {
@@ -121,14 +129,17 @@ export default function App() {
       api.heldLocation().then((value) => {
         if (read !== reads) return;
         setHeld(value);
-        if (first && value && !camera) {
-          setTarget((current) => current ?? value);
-          map.current?.setCameraPosition({ coordinates: toMap(value), zoom: ZOOM }).catch(reportError);
-        }
+        if (!first) return;
         first = false;
+        if (value) setTarget((current) => current ?? value);
+        if (camera) return;
+        if (value) look(toMap(value));
+        else map.current?.setCameraPosition().catch(reportError);
       }, (error: unknown) => {
         if (read !== reads) return;
         setHeld(undefined);
+        if (first && !camera) map.current?.setCameraPosition().catch(reportError);
+        first = false;
         reportError(error);
       });
     };
@@ -153,26 +164,38 @@ export default function App() {
   }, [camera]);
   useEffect(() => attempt(() => store.saveDraft(draft)), [draft]);
   useEffect(() => {
-    if (!camera) map.current?.setCameraPosition().catch(reportError);
-  }, [camera]);
-  useEffect(() => {
     if (!moving) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [moving]);
 
+  function look(location: Point, level = ZOOM) {
+    centre.aimAt(location, Date.now());
+    map.current?.setCameraPosition({ coordinates: location, zoom: level }).catch(reportError);
+  }
   // A map tap, a search result, typed coordinates or a favorite: it moves
-  // the pin, or extends the route.
+  // the pin and the crosshair to it, or extends the route.
   const choose = (location: Point) => {
-    if (mode === "point") setTarget(toGPS(location));
-    else addStop(toGPS(location));
+    if (mode !== "point") return addStop(toGPS(location));
+    setTarget(toGPS(location));
+    look(location, zoom.current);
+  };
+  const panned = (view: Camera) => {
+    zoom.current = view.zoom;
+    setClose(view.zoom >= PICK_ZOOM);
+    // A sheet or the keyboard moves the safe area, not what was chosen.
+    if (centre.moved(view, Date.now()) && mode === "point" && !sheetShown && !entering) setTarget(toGPS(view.coordinates));
+  };
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    if (next === "point" && target) look(toMap(target));
   };
   const addStop = (gps: Point) =>
     setDraft((d) => (d.points.length < MAX_POINTS ? { ...d, points: [...d.points, pairOf(gps)] } : d));
   const reveal = (gps: Point) => {
     if (mode === "point") setTarget(gps);
     else addStop(gps);
-    map.current?.setCameraPosition({ coordinates: toMap(gps), zoom: ZOOM }).catch(reportError);
+    look(toMap(gps));
   };
   const show = (kind: Sheet) => {
     setSheet(kind);
@@ -190,7 +213,7 @@ export default function App() {
     primary = here
       ? { label: "恢复真实位置", stop: true, press: restore }
       : { label: "模拟此位置", off: !target, press: () => run(() => api.setPoint(target!)) };
-    caption = target ? format(target) : "轻点地图选择位置";
+    caption = target ? format(target) : close ? "拖动地图，用准星选位置" : "放大地图后用准星选位置";
   } else {
     primary = moving
       ? {
@@ -230,8 +253,10 @@ export default function App() {
               <ZStack>
                 <Group modifiers={[ignoreSafeArea()]}>
                   <RNHostView>
+                    <View style={styles.fill}>
                     <AppleMaps.View
                       ref={map}
+                      style={styles.fill}
                       cameraPosition={camera}
                       markers={mode === "point"
                         ? pin ? [{ id: "pin", coordinates: pin, systemImage: "mappin" }] : []
@@ -243,7 +268,10 @@ export default function App() {
                       properties={{ isMyLocationEnabled: true, selectionEnabled: false }}
                       uiSettings={{ togglePitchEnabled: false }}
                       onMapClick={(event) => choose(event.coordinates as Point)}
+                      onCameraMove={(event) => panned(event as Camera)}
                     />
+                    {mode === "point" && close ? <Crosshair /> : null}
+                    </View>
                   </RNHostView>
                 </Group>
                 <BottomSheet isPresented={sheetShown} onIsPresentedChange={setSheetShown}>
@@ -272,7 +300,7 @@ export default function App() {
                         onChange={setDraft}
                         onImport={(points) => {
                           setDraft((d) => ({ ...d, points }));
-                          map.current?.setCameraPosition({ coordinates: toMap(pointOf(points[0])), zoom: ZOOM }).catch(reportError);
+                          look(toMap(pointOf(points[0])));
                         }}
                       />
                     )}
@@ -295,7 +323,7 @@ export default function App() {
               <Button label="返回" systemImage="chevron.left" onPress={exit} />
             </ToolbarItem>
             <ToolbarItem placement="principal">
-              <Picker selection={mode} onSelectionChange={setMode} modifiers={[pickerStyle("segmented")]}>
+              <Picker selection={mode} onSelectionChange={switchMode} modifiers={[pickerStyle("segmented")]}>
                 <Text modifiers={[tag("point")]}>定点</Text>
                 <Text modifiers={[tag("route")]}>路线</Text>
               </Picker>
@@ -347,6 +375,25 @@ export default function App() {
   );
 }
 
+// The map reports the centre of its safe area. SafeAreaView (deprecated, but it
+// reads the same UIKit insets) puts the crosshair there; it takes no touches.
+function Crosshair() {
+  return (
+    <SafeAreaView pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <View pointerEvents="none" style={styles.centre}>
+        <View style={[styles.hair, { width: 28, height: 4 }]} />
+        <View style={[styles.hair, { width: 4, height: 28 }]} />
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  fill: { flex: 1 },
+  centre: { flex: 1, alignItems: "center", justifyContent: "center" },
+  hair: { position: "absolute", backgroundColor: "#1c1c1e", borderColor: "#ffffff", borderWidth: 1 },
+});
+
 function SearchPlaces({ onChoose }: { onChoose(location: Point): void }) {
   const query = useNativeState("");
   const [text, setText] = useState("");
@@ -397,7 +444,7 @@ function Favorites({ items, pin, onChoose, onChange }: {
   return (
     <NavigationStack>
       <List modifiers={[navigationTitle("收藏夹"), navigationBarTitleDisplayMode("inline")]}>
-        <Section footer={<Text>{pin ? `图钉：${format(pin)}` : "先在定点模式下轻点地图放一个图钉。"}</Text>}>
+        <Section footer={<Text>{pin ? `图钉：${format(pin)}` : "先在定点模式下用准星选一个位置。"}</Text>}>
           <TextField text={field} placeholder="名称" onTextChange={setName} />
           <Button
             label="收藏图钉位置"
