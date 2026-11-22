@@ -1,12 +1,12 @@
 {
   "name": "simlocation-swiplet",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "license": "GPL-3.0-or-later",
   "swiplet": {
     "id": "simlocation",
-    "versionCode": 5,
+    "versionCode": 6,
     "name": "SimLocation",
     "localizedNames": {
       "zh-Hans": "SimLocation 定位"
