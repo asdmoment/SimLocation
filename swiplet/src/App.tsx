@@ -97,6 +97,7 @@ export default function App() {
   const [draft, setDraft] = useState(store.draft);
   const [favorites, setFavorites] = useState(store.favorites);
   const [recent, setRecent] = useState(store.recent);
+  const [satellite, setSatellite] = useState(store.satellite);
   const [mode, setMode] = useState<Mode>(request?.plan.mode === "route" ? "route" : "point");
   // WGS-84, so a favorite or typed coordinate is submitted exactly as given.
   const [target, setTarget] = useState(() => (request?.plan.mode === "point" ? request.plan.point : null));
@@ -286,7 +287,11 @@ export default function App() {
                         ? [{ id: "route", coordinates: draft.loop ? [...path, path[0]] : path, width: 4 }]
                         : []}
                       // The blue dot is what iOS reports, simulated or not.
-                      properties={{ isMyLocationEnabled: true, selectionEnabled: false }}
+                      properties={{
+                        isMyLocationEnabled: true,
+                        selectionEnabled: false,
+                        mapType: satellite ? AppleMaps.MapType.HYBRID : AppleMaps.MapType.STANDARD,
+                      }}
                       uiSettings={{ togglePitchEnabled: false }}
                       onMapClick={(event) => choose(event.coordinates as Point)}
                       onCameraMove={(event) => panned(event as Camera)}
@@ -387,6 +392,15 @@ export default function App() {
                 {restorable(held, moving) ? (
                   <Button label="恢复真实位置" systemImage="location.slash" role="destructive" onPress={restore} />
                 ) : null}
+                <Toggle
+                  label="卫星图"
+                  systemImage="globe.asia.australia"
+                  isOn={satellite}
+                  onIsOnChange={(on) => {
+                    setSatellite(on);
+                    attempt(() => store.saveSatellite(on));
+                  }}
+                />
                 <Link label="启动 Surge" destination={SURGE} />
                 <Link label="蜂窝网络重连" destination={CELLULAR} />
               </Menu>

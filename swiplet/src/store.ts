@@ -113,6 +113,11 @@ export function createStore(db: Database) {
       db.runSync("INSERT OR REPLACE INTO state (key, value) VALUES ('recent', ?)", JSON.stringify(saved));
     },
 
+    satellite: () => read("satellite") === true,
+    saveSatellite(on: boolean) {
+      db.runSync("INSERT OR REPLACE INTO state (key, value) VALUES ('satellite', ?)", JSON.stringify(on));
+    },
+
     favorites,
     addFavorite(name: string, point: Point) {
       const same = favorites().find((f) => Math.abs(f.lat - point.latitude) < 1e-6 && Math.abs(f.lon - point.longitude) < 1e-6);
