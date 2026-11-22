@@ -59,3 +59,5 @@ export function toGPS(p: Point): Point {
   const gps = unshift(p);
   return needsShift(gps) || needsShift(p) ? gps : p;
 }
+// AMap's links: shifted in Hong Kong and Macau as well, not in Taiwan or abroad.
+export const fromAMap = (p: Point): Point => china(p) ? unshift(p) : p;

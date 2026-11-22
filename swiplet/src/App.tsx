@@ -4,9 +4,9 @@ import {
   useNativeState, VStack, ZStack,
 } from "@expo/ui/swift-ui";
 import {
-  buttonStyle, disabled, font, foregroundStyle, ignoreSafeArea, keyboardType, labelStyle,
+  autocorrectionDisabled, buttonStyle, disabled, font, foregroundStyle, ignoreSafeArea, keyboardType, labelStyle,
   monospacedDigit, multilineTextAlignment, navigationBarTitleDisplayMode, navigationTitle, pickerStyle, presentationDetents,
-  searchable, tag, tint,
+  searchable, tag, textInputAutocapitalization, tint,
 } from "@expo/ui/swift-ui/modifiers";
 import { searchPlaces } from "@swipt/api/maps";
 import { actions, exit, useService } from "@swipt/api/swiplet";
@@ -17,10 +17,11 @@ import { AppState, SafeAreaView, StyleSheet, View } from "react-native";
 
 import { toGPS, toMap } from "./coordinates";
 import type extension from "./extension";
+import { findPlace, parsePlace } from "./links";
 import { holds, restorable, type Held } from "./location";
 import { Centre, PICK_ZOOM, type Camera } from "./picker";
 import {
-  checkRoute, MAX_POINTS, pairOf, parseCoordinate, parseRoute, Playback, pointOf, Route,
+  checkRoute, MAX_POINTS, pairOf, parseRoute, Playback, pointOf, Route,
   type Pair, type Point,
 } from "./route";
 import { createStore, DATABASE, type Draft, type Favorite, type Request } from "./store";
@@ -60,6 +61,17 @@ const clipboard = async () => {
   if (!text) throw new Error("剪贴板里没有文本。");
   return text;
 };
+
+// Where a short link leads, after its redirects.
+async function follow(link: string) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    return (await fetch(link, { signal: controller.signal })).url;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function playbackOf(request: Request | null) {
   try {
@@ -197,6 +209,13 @@ export default function App() {
     else addStop(gps);
     look(toMap(gps));
   };
+  // Opening a short link takes a while: by then the mode may be another. It
+  // stays out of the queue, where it would hold up a restore.
+  const revealed = useRef(reveal);
+  revealed.current = reveal;
+  const open = (text: () => Promise<string>) => {
+    (async () => revealed.current(await findPlace(await text(), follow)))().catch(reportError);
+  };
   const show = (kind: Sheet) => {
     setSheet(kind);
     setSheetShown(true);
@@ -205,7 +224,7 @@ export default function App() {
 
   const pin = target && toMap(target);
   const here = !moving && holds(held, target);
-  const entered = parseCoordinate(entry);
+  const entered = parsePlace(entry);
 
   let primary: { label: string; press(): void; stop?: boolean; off?: boolean };
   let caption: string;
@@ -248,7 +267,7 @@ export default function App() {
     <Host style={{ flex: 1 }}>
       <NavigationStack>
         <Toolbar modifiers={[navigationTitle("SimLocation"), navigationBarTitleDisplayMode("inline")]}>
-          <Alert title="输入坐标" isPresented={entering} onIsPresentedChange={setEntering}>
+          <Alert title="输入坐标或链接" isPresented={entering} onIsPresentedChange={setEntering}>
             <Alert.Trigger>
               <ZStack>
                 <Group modifiers={[ignoreSafeArea()]}>
@@ -310,12 +329,12 @@ export default function App() {
             </Alert.Trigger>
             <Alert.Actions>
               <TextField
-                placeholder="纬度, 经度（WGS-84）"
+                placeholder="纬度, 经度（WGS-84）或地图链接"
                 onTextChange={setEntry}
-                modifiers={[keyboardType("numbers-and-punctuation")]}
+                modifiers={[keyboardType("numbers-and-punctuation"), autocorrectionDisabled(), textInputAutocapitalization("never")]}
               />
               <Button label="取消" role="cancel" onPress={() => {}} />
-              <Button label="完成" onPress={() => entered && reveal(entered)} modifiers={[disabled(!entered)]} />
+              <Button label="完成" onPress={() => entered && open(async () => entry)} modifiers={[disabled(!entered)]} />
             </Alert.Actions>
           </Alert>
           <Toolbar.Content>
@@ -332,13 +351,14 @@ export default function App() {
               <Menu label="更多" systemImage="ellipsis" modifiers={[labelStyle("iconOnly")]}>
                 <Button label="搜索地点" systemImage="magnifyingglass" onPress={() => show("search")} />
                 <Button
-                  label="输入坐标"
+                  label="输入坐标或链接"
                   systemImage="number"
                   onPress={() => {
                     setEntry("");
                     setEntering(true);
                   }}
                 />
+                <Button label="粘贴地图链接" systemImage="link" onPress={() => open(clipboard)} />
                 <Button label="收藏夹" systemImage="star" onPress={() => show("favorites")} />
                 {mode === "route" ? (
                   <Button
