@@ -317,6 +317,7 @@ export default function App() {
                       <Favorites
                         items={favorites}
                         pin={target}
+                        held={moving ? null : held}
                         onChoose={(item) => {
                           setSheetShown(false);
                           reveal({ latitude: item.lat, longitude: item.lon });
@@ -486,9 +487,10 @@ function Recent({ items, favorites, onChoose }: { items: Point[]; favorites: Fav
   );
 }
 
-function Favorites({ items, pin, onChoose, onChange }: {
+function Favorites({ items, pin, held, onChoose, onChange }: {
   items: Favorite[];
   pin: Point | null;
+  held: Held;
   onChoose(item: Favorite): void;
   onChange(): void;
 }) {
@@ -519,6 +521,9 @@ function Favorites({ items, pin, onChoose, onChange }: {
                 <Button onPress={() => onChoose(item)} modifiers={[buttonStyle("plain")]}>
                   <VStack alignment="leading">
                     <Text>{item.name}</Text>
+                    {holds(held, { latitude: item.lat, longitude: item.lon })
+                      ? <Text modifiers={[font({ textStyle: "caption" }), foregroundStyle({ type: "color", color: "green" })]}>当前生效</Text>
+                      : null}
                     <Text modifiers={[...secondary, monospacedDigit()]}>
                       {format({ latitude: item.lat, longitude: item.lon })}
                     </Text>
